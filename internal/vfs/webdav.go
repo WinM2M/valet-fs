@@ -25,19 +25,42 @@ func (a *webdavAdapter) Mkdir(_ context.Context, name string, perm os.FileMode) 
 func (a *webdavAdapter) OpenFile(_ context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
 	n, err := a.fs.Stat(name)
 	if err != nil {
-		if flag&os.O_CREATE != 0 {
-			if err := a.fs.Write(name, nil, perm); err != nil {
-				return nil, err
-			}
-			n, _ = a.fs.Stat(name)
-		} else {
-			return nil, err
+		if flag&os.O_CREATE == 0 {
+			return nil, mapErr(err)
 		}
+		// Auto-create any missing parent dirs so PUT /a/b/c.txt works
+		// without requiring an explicit MKCOL chain first. WebDAV
+		// clients (curl, Finder, davfs2) all assume this works.
+		if dir := path.Dir(name); dir != "" && dir != "." && dir != "/" {
+			_ = a.fs.MkdirAll(dir, 0o700)
+		}
+		if err := a.fs.Write(name, nil, perm); err != nil {
+			return nil, mapErr(err)
+		}
+		n, _ = a.fs.Stat(name)
 	}
 	if flag&os.O_TRUNC != 0 && n != nil && !n.IsDir {
-		_ = a.fs.Write(name, nil, perm)
+		if err := a.fs.Write(name, nil, perm); err != nil {
+			return nil, mapErr(err)
+		}
 	}
-	return &webdavFile{name: name, fs: a.fs}, nil
+	return &webdavFile{name: name, fs: a.fs, isDir: n != nil && n.IsDir}, nil
+}
+
+// mapErr converts MemFS sentinels into errors the net/webdav handler knows
+// how to translate into proper HTTP status codes. Returning a bare error
+// causes the handler to surface 500 Internal Server Error instead of 404.
+func mapErr(err error) error {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return os.ErrNotExist
+	case errors.Is(err, ErrExists):
+		return os.ErrExist
+	case errors.Is(err, ErrInvalidPath):
+		return os.ErrInvalid
+	default:
+		return err
+	}
 }
 
 func (a *webdavAdapter) RemoveAll(_ context.Context, name string) error {
@@ -58,7 +81,7 @@ func (a *webdavAdapter) Rename(_ context.Context, oldName, newName string) error
 func (a *webdavAdapter) Stat(_ context.Context, name string) (fs.FileInfo, error) {
 	n, err := a.fs.Stat(name)
 	if err != nil {
-		return nil, err
+		return nil, mapErr(err)
 	}
 	size := int64(0)
 	if !n.IsDir {
@@ -74,6 +97,7 @@ type webdavFile struct {
 	name   string
 	fs     *MemFS
 	offset int64
+	isDir  bool
 }
 
 func (f *webdavFile) Close() error { return nil }
@@ -81,9 +105,12 @@ func (f *webdavFile) Close() error { return nil }
 func (f *webdavFile) Read(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.isDir {
+		return 0, errors.New("is a directory")
+	}
 	data, err := f.fs.Read(f.name)
 	if err != nil {
-		return 0, err
+		return 0, mapErr(err)
 	}
 	if f.offset >= int64(len(data)) {
 		return 0, io.EOF
@@ -129,7 +156,7 @@ func (f *webdavFile) Write(p []byte) (int, error) {
 func (f *webdavFile) Readdir(count int) ([]fs.FileInfo, error) {
 	names, err := f.fs.List(f.name)
 	if err != nil {
-		return nil, err
+		return nil, mapErr(err)
 	}
 	out := make([]fs.FileInfo, 0, len(names))
 	for _, name := range names {
@@ -149,16 +176,17 @@ func (f *webdavFile) Readdir(count int) ([]fs.FileInfo, error) {
 	if count > 0 && count < len(out) {
 		out = out[:count]
 	}
-	if len(out) == 0 {
-		return out, errors.New("eof")
-	}
+	// IMPORTANT: an empty directory must return (empty slice, nil) — NOT
+	// a bespoke error. The net/webdav handler treats any non-nil error
+	// other than io.EOF as a server fault and aborts the PROPFIND with
+	// 500 mid-response. Returning io.EOF is also accepted when count > 0.
 	return out, nil
 }
 
 func (f *webdavFile) Stat() (fs.FileInfo, error) {
 	n, err := f.fs.Stat(f.name)
 	if err != nil {
-		return nil, err
+		return nil, mapErr(err)
 	}
 	size := int64(0)
 	if !n.IsDir {
