@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="anomalyco/valet-fs"
+REPO="winm2m/valet-fs"
 BINARY_NAME="valetfs"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 TMP_FILE=""
