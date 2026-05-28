@@ -6,6 +6,7 @@ on:
     paths: ["scripts/install.sh"]
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
