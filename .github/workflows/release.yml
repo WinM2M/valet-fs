@@ -9,8 +9,16 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,19 +28,35 @@ jobs:
         with:
           go-version: '1.19'
 
-      - name: Build Linux amd64
+      - name: Install build dependencies
         run: |
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o valetfs-linux-amd64 ./cmd/valetfs
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev pkg-config build-essential
 
-      - name: Build Linux arm64
+      - name: Build Linux binary
         run: |
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o valetfs-linux-arm64 ./cmd/valetfs
+          GOOS=linux GOARCH=${{ matrix.arch }} go build -ldflags="-s -w" -o valetfs-linux-${{ matrix.arch }} ./cmd/valetfs
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: valetfs-linux-${{ matrix.arch }}
+          path: valetfs-linux-${{ matrix.arch }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            valetfs-linux-amd64
-            valetfs-linux-arm64
+            dist/valetfs-linux-amd64/valetfs-linux-amd64
+            dist/valetfs-linux-arm64/valetfs-linux-arm64
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
