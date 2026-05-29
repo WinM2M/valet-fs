@@ -4,8 +4,6 @@ on:
   push:
     branches: ["main"]
     paths: ["scripts/install.sh", "docs/index.html", ".github/workflows/pages.yml"]
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
