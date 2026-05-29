@@ -38,7 +38,7 @@ type runtimeState struct {
 }
 
 var cliVerbose bool
-const cliVersion = "0.1.0"
+const cliVersion = "0.1.2"
 
 func main() {
 	if len(os.Args) > 1 {

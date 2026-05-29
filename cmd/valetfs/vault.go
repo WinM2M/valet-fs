@@ -14,6 +14,8 @@ import (
 	"golang.org/x/term"
 )
 
+const vaultAuthModeFile = ".vault_auth_mode"
+
 func runVault(args []string) error {
 	fs := flag.NewFlagSet("vault", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -29,6 +31,7 @@ func runVault(args []string) error {
 		return fmt.Errorf("usage: valetfs vault <init|add|ls|rm|pair|sync|unmount|status>")
 	}
 	vdir := *vdirFlag
+	authMode := readVaultAuthMode(vdir)
 	vault.SetPassphraseProvider(func() string {
 		if *passwordFile != "" {
 			b, err := os.ReadFile(*passwordFile)
@@ -38,6 +41,9 @@ func runVault(args []string) error {
 		}
 		if p := os.Getenv("VALETFS_VAULT_PASSWORD"); p != "" {
 			return p
+		}
+		if authMode == "none" {
+			return ""
 		}
 		if term.IsTerminal(int(os.Stdin.Fd())) {
 			_, _ = fmt.Fprint(os.Stdout, "Vault passphrase: ")
@@ -53,6 +59,9 @@ func runVault(args []string) error {
 		if line != "" {
 			return line
 		}
+		if authMode == "passphrase" {
+			return ""
+		}
 		return "valetfs-default-dev-passphrase"
 	})
 	v, err := vault.Open(vdir)
@@ -66,6 +75,13 @@ func runVault(args []string) error {
 		if err == nil {
 			_, _ = fmt.Fprintln(os.Stdout, "vault already initialized")
 			return nil
+		}
+		mode := "none"
+		if *passwordFile != "" || os.Getenv("VALETFS_VAULT_PASSWORD") != "" {
+			mode = "passphrase"
+		}
+		if err := writeVaultAuthMode(vdir, mode); err != nil {
+			return err
 		}
 		_, _ = fmt.Fprintln(os.Stdout, "vault initialized at", vdir)
 		return nil
@@ -251,6 +267,29 @@ func runVault(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown vault subcommand: %s", args[0])
+}
+
+func authModePath(vdir string) string {
+	return filepath.Join(vdir, vaultAuthModeFile)
+}
+
+func readVaultAuthMode(vdir string) string {
+	b, err := os.ReadFile(authModePath(vdir))
+	if err != nil {
+		return ""
+	}
+	mode := strings.TrimSpace(string(b))
+	if mode == "none" || mode == "passphrase" {
+		return mode
+	}
+	return ""
+}
+
+func writeVaultAuthMode(vdir, mode string) error {
+	if err := os.MkdirAll(vdir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(authModePath(vdir), []byte(mode+"\n"), 0o600)
 }
 
 func defaultVaultDir() string {
