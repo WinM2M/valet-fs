@@ -3,7 +3,7 @@ name: Deploy Pages
 on:
   push:
     branches: ["main"]
-    paths: ["scripts/install.sh"]
+    paths: ["scripts/install.sh", "docs/index.html", ".github/workflows/pages.yml"]
   release:
     types: [published]
   workflow_dispatch:
@@ -27,6 +27,7 @@ jobs:
         run: |
           mkdir -p _site
           cp scripts/install.sh _site/install.sh
+          cp docs/index.html _site/index.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

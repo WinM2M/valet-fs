@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,8 @@ type Peer struct {
 	mu      sync.Mutex
 	pc      *webrtc.PeerConnection
 	dc      *webrtc.DataChannel
+	role    string
+	onICE   func(webrtc.ICECandidateInit)
 	onData  func([]byte)
 	onOpen  func()
 	onClose func()
@@ -37,7 +40,40 @@ func New() (*Peer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Peer{pc: pc}, nil
+	return &Peer{pc: pc, role: "daemon"}, nil
+}
+
+// NewDaemon creates offerer-side peer for valetfs serve.
+func NewDaemon() (*Peer, error) { return New() }
+
+// NewController creates answerer-side peer for valetfs vault pair.
+func NewController() (*Peer, error) {
+	p, err := New()
+	if err != nil {
+		return nil, err
+	}
+	p.role = "controller"
+	p.pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		p.mu.Lock()
+		p.dc = dc
+		p.mu.Unlock()
+		dc.OnOpen(func() {
+			if p.onOpen != nil {
+				p.onOpen()
+			}
+		})
+		dc.OnClose(func() {
+			if p.onClose != nil {
+				p.onClose()
+			}
+		})
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			if p.onData != nil {
+				p.onData(msg.Data)
+			}
+		})
+	})
+	return p, nil
 }
 
 // OnData registers a callback invoked for each inbound DataChannel message.
@@ -48,6 +84,22 @@ func (p *Peer) OnOpen(fn func()) { p.onOpen = fn }
 
 // OnClose registers a callback invoked when the DataChannel is closed.
 func (p *Peer) OnClose(fn func()) { p.onClose = fn }
+
+// OnICECandidate registers a callback for local ICE candidates.
+func (p *Peer) OnICECandidate(fn func(webrtc.ICECandidateInit)) {
+	p.onICE = fn
+	p.pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil || p.onICE == nil {
+			return
+		}
+		p.onICE(c.ToJSON())
+	})
+}
+
+// AddRemoteCandidate appends an ICE candidate from signaling.
+func (p *Peer) AddRemoteCandidate(c webrtc.ICECandidateInit) error {
+	return p.pc.AddICECandidate(c)
+}
 
 // CreateOffer creates the "valetfs" DataChannel, generates an SDP offer and
 // returns the local description encoded for transport to the signaling layer.
@@ -83,13 +135,27 @@ func (p *Peer) CreateOffer() (webrtc.SessionDescription, error) {
 	if err := p.pc.SetLocalDescription(offer); err != nil {
 		return offer, err
 	}
-	<-webrtc.GatheringCompletePromise(p.pc)
 	return *p.pc.LocalDescription(), nil
 }
 
 // AcceptAnswer applies the remote SDP answer.
 func (p *Peer) AcceptAnswer(answer webrtc.SessionDescription) error {
 	return p.pc.SetRemoteDescription(answer)
+}
+
+// AcceptOfferAndAnswer applies remote offer and returns local answer.
+func (p *Peer) AcceptOfferAndAnswer(offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
+	if err := p.pc.SetRemoteDescription(offer); err != nil {
+		return webrtc.SessionDescription{}, err
+	}
+	answer, err := p.pc.CreateAnswer(nil)
+	if err != nil {
+		return webrtc.SessionDescription{}, err
+	}
+	if err := p.pc.SetLocalDescription(answer); err != nil {
+		return webrtc.SessionDescription{}, err
+	}
+	return *p.pc.LocalDescription(), nil
 }
 
 // Send writes raw bytes over the DataChannel.
@@ -124,7 +190,8 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 		return fmt.Errorf("create offer: %w", err)
 	}
 
-	payload, _ := json.Marshal(map[string]any{"offer": offer})
+	signalingURL = strings.TrimRight(signalingURL, "/")
+	payload, _ := json.Marshal(map[string]any{"role": "daemon", "offer": offer})
 	resp, err := http.Post(signalingURL+"/sessions", "application/json", bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("post offer: %w", err)
@@ -133,6 +200,7 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 	body, _ := io.ReadAll(resp.Body)
 	var created struct {
 		SessionID string `json:"session_id"`
+		Token     string `json:"daemon_token"`
 	}
 	if err := json.Unmarshal(body, &created); err != nil {
 		return fmt.Errorf("decode session: %w", err)
@@ -148,9 +216,14 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 	fmt.Println("Scan with the ValetFS mobile app to pair.")
 
 	// Long-poll the Worker for the remote answer.
+	if err := p.startCandidateExchange(signalingURL, created.SessionID, created.Token, "daemon"); err != nil {
+		return err
+	}
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
-		ar, err := http.Get(signalingURL + "/sessions/" + created.SessionID + "/answer")
+		req, _ := http.NewRequest(http.MethodGet, signalingURL+"/sessions/"+created.SessionID+"/answer", nil)
+		req.Header.Set("X-Valet-Role-Token", created.Token)
+		ar, err := http.DefaultClient.Do(req)
 		if err != nil {
 			time.Sleep(2 * time.Second)
 			continue
@@ -169,4 +242,109 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 		time.Sleep(2 * time.Second)
 	}
 	return fmt.Errorf("webrtc: timed out waiting for mobile pairing")
+}
+
+// Join claims a daemon session as controller, exchanges SDP answer and connects.
+func (p *Peer) Join(signalingURL, sessionID string) error {
+	if signalingURL == "" || sessionID == "" {
+		return fmt.Errorf("webrtc: signaling URL and session ID are required")
+	}
+	signalingURL = strings.TrimRight(signalingURL, "/")
+
+	claimBody, _ := json.Marshal(map[string]any{"role": "controller"})
+	resp, err := http.Post(signalingURL+"/sessions/"+sessionID+"/claim", "application/json", bytes.NewReader(claimBody))
+	if err != nil {
+		return fmt.Errorf("claim session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("claim failed: %s", strings.TrimSpace(string(b)))
+	}
+	var claimed struct {
+		ControllerToken string                    `json:"controller_token"`
+		Offer           webrtc.SessionDescription `json:"offer"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&claimed); err != nil {
+		return fmt.Errorf("decode claim: %w", err)
+	}
+	if claimed.ControllerToken == "" {
+		return fmt.Errorf("missing controller token")
+	}
+	if err := p.startCandidateExchange(signalingURL, sessionID, claimed.ControllerToken, "controller"); err != nil {
+		return err
+	}
+
+	answer, err := p.AcceptOfferAndAnswer(claimed.Offer)
+	if err != nil {
+		return fmt.Errorf("create answer: %w", err)
+	}
+
+	ab, _ := json.Marshal(map[string]any{"answer": answer})
+	req, _ := http.NewRequest(http.MethodPost, signalingURL+"/sessions/"+sessionID+"/answer", bytes.NewReader(ab))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Valet-Role-Token", claimed.ControllerToken)
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("post answer: %w", err)
+	}
+	defer r.Body.Close()
+	if r.StatusCode >= 300 {
+		b, _ := io.ReadAll(r.Body)
+		return fmt.Errorf("post answer failed: %s", strings.TrimSpace(string(b)))
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		state := p.pc.ConnectionState()
+		if state == webrtc.PeerConnectionStateConnected {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("webrtc: timed out waiting for data channel open")
+}
+
+func (p *Peer) startCandidateExchange(signalingURL, sessionID, token, role string) error {
+	p.OnICECandidate(func(c webrtc.ICECandidateInit) {
+		body, _ := json.Marshal(map[string]any{"candidates": []webrtc.ICECandidateInit{c}})
+		req, _ := http.NewRequest(http.MethodPost, signalingURL+"/sessions/"+sessionID+"/candidates", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Valet-Role-Token", token)
+		_, _ = http.DefaultClient.Do(req)
+	})
+
+	go func() {
+		since := 0
+		for {
+			if p.pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
+				return
+			}
+			req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/sessions/%s/candidates?since=%d", signalingURL, sessionID, since), nil)
+			req.Header.Set("X-Valet-Role-Token", token)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				time.Sleep(400 * time.Millisecond)
+				continue
+			}
+			if resp.StatusCode >= 300 {
+				resp.Body.Close()
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			var out struct {
+				Candidates []webrtc.ICECandidateInit `json:"candidates"`
+				Next       int                       `json:"next"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&out)
+			resp.Body.Close()
+			for _, c := range out.Candidates {
+				_ = p.AddRemoteCandidate(c)
+			}
+			since = out.Next
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
+	_ = role
+	return nil
 }

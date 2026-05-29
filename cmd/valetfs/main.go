@@ -45,6 +45,12 @@ func main() {
 		case "serve":
 			serve(os.Args[2:])
 			return
+		case "vault":
+			if err := runVault(os.Args[2:]); err != nil {
+				_, _ = fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		case "stop", "status", "ls", "cat", "cp", "rm", "del", "mkdir", "rmdir", "mv", "completion", "__complete":
 			if err := runCLI(os.Args[1:]); err != nil {
 				_, _ = fmt.Fprintln(os.Stderr, err)
@@ -53,7 +59,7 @@ func main() {
 			return
 		}
 	}
-	_, _ = fmt.Fprintln(os.Stderr, "usage: valetfs serve [options] | valetfs <command>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: valetfs serve [options] | valetfs vault <subcommand> | valetfs <command>")
 	os.Exit(1)
 }
 
@@ -102,8 +108,66 @@ func serve(args []string) {
 			}
 		})
 		peer.OnData(func(msg []byte) {
-			// In a full implementation the mobile app posts file ops here.
-			log.Printf("valetd: data channel rx: %d bytes", len(msg))
+			if rpc, err := webrtc.DecodeRPC(msg); err == nil && strings.EqualFold(rpc.Type, "REQ") {
+				switch strings.ToUpper(rpc.Method) {
+				case "UNMOUNT":
+					if err := d.Unmount(); err != nil {
+						log.Printf("valetd: unmount error from remote rpc: %v", err)
+					}
+					d.MemFS().Wipe()
+				case "WRITE":
+					p, _ := rpc.Params["path"].(string)
+					content, _ := rpc.Params["content"].(string)
+					if p != "" {
+						_ = d.MemFS().MkdirAll(path.Dir(p), 0o755)
+						if err := d.MemFS().Write(p, []byte(content), 0o600); err != nil {
+							log.Printf("valetd: write error from remote rpc: %v", err)
+						}
+					}
+				case "STATUS":
+					res, _ := webrtc.EncodeRPC(webrtc.RPCMessage{
+						V:    1,
+						ID:   rpc.ID,
+						Type: "RES",
+						OK:   true,
+						Result: map[string]any{
+							"mounted": d.MemFS().Used() >= 0,
+							"used":    d.MemFS().Used(),
+						},
+					})
+					_ = peer.Send(res)
+				}
+				return
+			}
+			type command struct {
+				Type    string         `json:"type"`
+				Action  string         `json:"action"`
+				Payload map[string]any `json:"payload"`
+			}
+			var c command
+			if err := json.Unmarshal(msg, &c); err != nil {
+				log.Printf("valetd: data channel rx (raw) %d bytes", len(msg))
+				return
+			}
+			switch strings.ToUpper(c.Action) {
+			case "UNMOUNT":
+				if err := d.Unmount(); err != nil {
+					log.Printf("valetd: unmount error from remote command: %v", err)
+				}
+				d.MemFS().Wipe()
+			case "WRITE":
+				p, _ := c.Payload["path"].(string)
+				content, _ := c.Payload["content"].(string)
+				if p == "" {
+					return
+				}
+				_ = d.MemFS().MkdirAll(path.Dir(p), 0o755)
+				if err := d.MemFS().Write(p, []byte(content), 0o600); err != nil {
+					log.Printf("valetd: write error from remote command: %v", err)
+				}
+			default:
+				log.Printf("valetd: remote command action=%s", c.Action)
+			}
 		})
 		go func() {
 			if err := peer.Bootstrap(cfg.SignalingURL); err != nil {

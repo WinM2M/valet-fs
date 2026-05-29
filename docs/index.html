@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ValetFS Installation Guide</title>
+  <style>
+    :root {
+      --bg: #f4f1ea;
+      --card: #fffdf8;
+      --ink: #1e2a28;
+      --muted: #4f5f5c;
+      --line: #dcd3c4;
+      --accent: #0f766e;
+      --accent-2: #155e75;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Noto Sans KR", "Pretendard", sans-serif;
+      background:
+        radial-gradient(circle at 12% 0%, #e8f1ef 0%, transparent 36%),
+        radial-gradient(circle at 100% 100%, #e3eef2 0%, transparent 30%),
+        var(--bg);
+      line-height: 1.6;
+    }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 40px 20px 56px; }
+    .hero {
+      background: linear-gradient(130deg, #f5fbfa 0%, #eef6f8 60%, #fdfcf8 100%);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 28px;
+      box-shadow: 0 12px 35px rgba(29, 42, 40, 0.08);
+    }
+    h1 { margin: 0 0 8px; font-size: 2rem; }
+    h2 { margin-top: 32px; font-size: 1.35rem; color: var(--accent-2); }
+    p { margin: 10px 0; }
+    ul { padding-left: 20px; }
+    code {
+      font-family: "JetBrains Mono", "Fira Code", monospace;
+      background: #f2efea;
+      padding: 2px 6px;
+      border-radius: 6px;
+      font-size: 0.95em;
+    }
+    pre {
+      margin: 14px 0;
+      padding: 14px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+      overflow-x: auto;
+    }
+    .badge {
+      display: inline-block;
+      margin-bottom: 10px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid #bed6d3;
+      background: #ecf7f6;
+      color: #115e59;
+      font-size: 0.8rem;
+      font-weight: 700;
+    }
+    @media (max-width: 700px) {
+      .wrap { padding: 20px 14px 36px; }
+      .hero { padding: 20px; border-radius: 14px; }
+      h1 { font-size: 1.6rem; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <span class="badge">ValetFS GitHub Pages</span>
+      <h1>ValetFS Quick Install Overview</h1>
+      <p>
+        ValetFS is a <strong>zero-backend, P2P, in-memory virtual file system</strong>
+        desktop daemon. It is designed to expose short-lived tokens/keys to AI
+        agents only while a paired mobile app allows it.
+      </p>
+      <p>
+        This repository contains the Go-based daemon (<code>cmd/valetfs</code>)
+        and a Cloudflare Worker signaling stub for WebRTC bootstrap
+        (<code>signaling/</code>).
+      </p>
+    </section>
+
+    <h2>Core Project Components</h2>
+    <ul>
+      <li><code>internal/vfs</code>: in-memory FS and FUSE/WebDAV mounting</li>
+      <li><code>internal/webrtc</code>: pion-based P2P connection + signaling integration</li>
+      <li><code>internal/sync</code>: commits manifest lines with hash/size/path only (no token body)</li>
+      <li><code>internal/daemon</code>: daemon lifecycle and local dev API</li>
+      <li><code>scripts/install.sh</code>: auto-download and install script for release binaries</li>
+    </ul>
+
+    <h2>Install with curl + install.sh (Recommended)</h2>
+    <p>On Linux, install the latest release with this one-liner:</p>
+    <pre><code>curl -fsSL https://winm2m.github.io/valet-fs/install.sh | bash</code></pre>
+    <p>
+      The installer detects OS/architecture (<code>amd64</code>, <code>arm64</code>),
+      downloads the matching binary from GitHub Releases, and installs it to
+      <code>/usr/local/bin/valetfs</code> by default.
+    </p>
+
+    <h2>Optional Parameters</h2>
+    <ul>
+      <li>Install a specific version: set <code>VALETFS_VERSION=v0.1.0</code></li>
+      <li>Change install path: set <code>INSTALL_DIR=/custom/bin</code></li>
+    </ul>
+    <pre><code>curl -fsSL https://winm2m.github.io/valet-fs/install.sh | VALETFS_VERSION=v0.1.0 INSTALL_DIR=$HOME/.local/bin bash</code></pre>
+
+    <h2>Quick Start After Install</h2>
+    <pre><code>valetfs serve --dev
+valetfs status</code></pre>
+    <p>
+      The daemon starts a local control API and WebDAV endpoint on loopback,
+      and keeps running even when FUSE mounting is unavailable.
+    </p>
+  </main>
+</body>
+</html>
