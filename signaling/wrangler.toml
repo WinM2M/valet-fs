@@ -1,0 +1,8 @@
+name = "valetfs-signaling"
+main = "worker.ts"
+compatibility_date = "2026-05-29"
+account_id = "3c2cc4ee727d35d579f97cecbfca62b2"
+
+[[kv_namespaces]]
+binding = "VALETFS_KV"
+id = "ca0376fbe5714e009b6bf8b6f936a117"
