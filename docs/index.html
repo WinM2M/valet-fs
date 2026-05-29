@@ -127,8 +127,10 @@ valetfs status</code></pre>
     </p>
 
     <p><strong>Device A (serve target)</strong></p>
-    <pre><code>valetfs serve --signaling https://valetfs-signaling.winm2m.workers.dev</code></pre>
+    <pre><code>valetfs serve</code></pre>
     <p>
+      If <code>--signaling</code> is omitted, default signaling URL is
+      <code>https://valetfs-signaling.winm2m.workers.dev</code>.
       Keep this process running and copy the printed <code>Session ID: ...</code> value.
     </p>
 
@@ -136,7 +138,7 @@ valetfs status</code></pre>
     <pre><code>export VALETFS_VAULT_PASSWORD='change-me'
 valetfs vault init
 valetfs vault add ./my-key.pem fs:/keys/my-key.pem
-valetfs vault pair &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.winm2m.workers.dev</code></pre>
+valetfs vault pair &lt;SESSION_ID&gt;</code></pre>
 
     <p>Optional follow-up commands:</p>
     <pre><code>valetfs vault sync &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.winm2m.workers.dev
@@ -147,6 +149,14 @@ valetfs vault unmount &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.w
       If follow-up commands time out when reconnecting to the same session, create a
       new serve session and pair again.
     </p>
+
+    <h2>Verbose Mode for Pairing Diagnostics</h2>
+    <p>
+      If pairing fails with timeout, run both sides with verbose logs to inspect
+      signaling, claim, answer, and ICE candidate exchange.
+    </p>
+    <pre><code>valetfs serve -v
+valetfs vault -v pair &lt;SESSION_ID&gt;</code></pre>
   </main>
 </body>
 </html>

@@ -65,7 +65,7 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&cfg.RuntimeDir, "runtime-dir", defaultEnv("VALETFS_RUNTIME_DIR", defaultRuntimeDir()), "Runtime state directory")
 	fs.StringVar(&cfg.WebdavAddr, "webdav-addr", defaultEnv("VALETFS_WEBDAV_ADDR", "127.0.0.1:0"), "WebDAV listen address")
 	fs.BoolVar(&cfg.WebdavDisabled, "webdav-disabled", defaultEnvBool("VALETFS_WEBDAV_DISABLED", false), "Disable WebDAV server")
-	fs.StringVar(&cfg.SignalingURL, "signaling", defaultEnv("VALETFS_SIGNALING", ""), "Cloudflare Worker signaling URL")
+	fs.StringVar(&cfg.SignalingURL, "signaling", defaultEnv("VALETFS_SIGNALING", "https://valetfs-signaling.winm2m.workers.dev"), "Cloudflare Worker signaling URL")
 	fs.StringVar(&cfg.GitTempDir, "git-dir", defaultEnv("VALETFS_GIT_DIR", defaultGitDir()), "Ephemeral go-git diff directory")
 
 	var quotaMB int64

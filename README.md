@@ -87,8 +87,12 @@ curl -X POST http://127.0.0.1:8080/sync
 ## Run (production)
 
 ```sh
-./valetfs serve --signaling https://your-worker.workers.dev
+./valetfs serve
 ```
+
+If `--signaling` is omitted, default signaling URL is:
+
+`https://valetfs-signaling.winm2m.workers.dev`
 
 The daemon prints an ASCII QR code; scan it from the ValetFS mobile app to
 complete WebRTC pairing.
@@ -116,8 +120,10 @@ Device B (vault origin/controller):
 export VALETFS_VAULT_PASSWORD='change-me'
 valetfs vault init
 valetfs vault add ./my-key.pem fs:/keys/my-key.pem
-valetfs vault pair <SESSION_ID> --signaling https://valetfs-signaling.winm2m.workers.dev
+valetfs vault pair <SESSION_ID>
 ```
+
+If `--signaling` is omitted in vault commands, the same default URL above is used.
 
 After pairing, the vault file is pushed to Device A memory FS via WebRTC DataChannel.
 
@@ -131,6 +137,17 @@ valetfs vault unmount <SESSION_ID> --signaling https://valetfs-signaling.winm2m.
 
 Note: current implementation is optimized for first controller pairing per session.
 For repeated `status/sync/unmount`, create a fresh serve session if rejoin times out.
+
+### Verbose connection logs
+
+To inspect where pairing fails, enable verbose mode on both sides:
+
+```sh
+valetfs serve -v
+valetfs vault -v pair <SESSION_ID>
+```
+
+`-v` (or `--verbose`) prints detailed signaling/claim/answer/candidate exchange logs.
 
 ## Local CLI (separate process)
 

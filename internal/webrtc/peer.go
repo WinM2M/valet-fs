@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -27,6 +28,16 @@ type Peer struct {
 	onData  func([]byte)
 	onOpen  func()
 	onClose func()
+}
+
+var verboseLogging bool
+
+func SetVerbose(v bool) { verboseLogging = v }
+
+func vlogf(format string, a ...any) {
+	if verboseLogging {
+		log.Printf("webrtc: "+format, a...)
+	}
 }
 
 // New constructs a Peer with sane defaults (STUN + TURN-fallback friendly).
@@ -187,6 +198,7 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 		return fmt.Errorf("webrtc: signaling URL is empty")
 	}
 
+	vlogf("bootstrap start signaling=%s", signalingURL)
 	offer, err := p.CreateOffer()
 	if err != nil {
 		return fmt.Errorf("create offer: %w", err)
@@ -210,6 +222,7 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 	if created.SessionID == "" {
 		return fmt.Errorf("signaling did not return a session id")
 	}
+	vlogf("session created id=%s", created.SessionID)
 
 	// Render QR code to terminal.
 	qrterminal.GenerateHalfBlock(
@@ -222,6 +235,7 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 	if err := p.startCandidateExchange(signalingURL, created.SessionID, created.Token, "daemon"); err != nil {
 		return err
 	}
+	vlogf("candidate exchange started role=daemon")
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequest(http.MethodGet, signalingURL+"/sessions/"+created.SessionID+"/answer", nil)
@@ -234,6 +248,7 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 		ab, _ := io.ReadAll(ar.Body)
 		ar.Body.Close()
 		if ar.StatusCode == http.StatusOK && len(ab) > 0 {
+			vlogf("answer received for session=%s", created.SessionID)
 			var wrap struct {
 				Answer webrtc.SessionDescription `json:"answer"`
 			}
@@ -254,6 +269,7 @@ func (p *Peer) Join(signalingURL, sessionID string) error {
 	}
 	signalingURL = strings.TrimRight(signalingURL, "/")
 
+	vlogf("join start signaling=%s session=%s", signalingURL, sessionID)
 	claimBody, _ := json.Marshal(map[string]any{"role": "controller"})
 	resp, err := http.Post(signalingURL+"/sessions/"+sessionID+"/claim", "application/json", bytes.NewReader(claimBody))
 	if err != nil {
@@ -274,9 +290,11 @@ func (p *Peer) Join(signalingURL, sessionID string) error {
 	if claimed.ControllerToken == "" {
 		return fmt.Errorf("missing controller token")
 	}
+	vlogf("claim success session=%s", sessionID)
 	if err := p.startCandidateExchange(signalingURL, sessionID, claimed.ControllerToken, "controller"); err != nil {
 		return err
 	}
+	vlogf("candidate exchange started role=controller")
 
 	answer, err := p.AcceptOfferAndAnswer(claimed.Offer)
 	if err != nil {
@@ -296,11 +314,13 @@ func (p *Peer) Join(signalingURL, sessionID string) error {
 		b, _ := io.ReadAll(r.Body)
 		return fmt.Errorf("post answer failed: %s", strings.TrimSpace(string(b)))
 	}
+	vlogf("answer posted session=%s", sessionID)
 
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		state := p.pc.ConnectionState()
 		if state == webrtc.PeerConnectionStateConnected {
+			vlogf("peer connected session=%s", sessionID)
 			return nil
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -310,6 +330,7 @@ func (p *Peer) Join(signalingURL, sessionID string) error {
 
 func (p *Peer) startCandidateExchange(signalingURL, sessionID, token, role string) error {
 	p.OnICECandidate(func(c webrtc.ICECandidateInit) {
+		vlogf("local candidate gathered role=%s", role)
 		body, _ := json.Marshal(map[string]any{"candidates": []webrtc.ICECandidateInit{c}})
 		req, _ := http.NewRequest(http.MethodPost, signalingURL+"/sessions/"+sessionID+"/candidates", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -342,6 +363,7 @@ func (p *Peer) startCandidateExchange(signalingURL, sessionID, token, role strin
 			_ = json.NewDecoder(resp.Body).Decode(&out)
 			resp.Body.Close()
 			for _, c := range out.Candidates {
+				vlogf("remote candidate received role=%s", role)
 				_ = p.AddRemoteCandidate(c)
 			}
 			since = out.Next

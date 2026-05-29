@@ -38,7 +38,7 @@ type runtimeState struct {
 }
 
 var cliVerbose bool
-const cliVersion = "0.0.7"
+const cliVersion = "0.0.9"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -71,7 +71,17 @@ func main() {
 }
 
 func serve(args []string) {
-	cfg, err := config.Load(args)
+	serveVerbose := false
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "-v" || a == "--verbose" {
+			serveVerbose = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	webrtc.SetVerbose(serveVerbose)
+	cfg, err := config.Load(filtered)
 	if err != nil {
 		log.Fatalf("valetfs: config error: %v", err)
 	}

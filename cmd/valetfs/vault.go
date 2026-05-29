@@ -19,6 +19,8 @@ func runVault(args []string) error {
 	fs.SetOutput(os.Stderr)
 	vdirFlag := fs.String("vault-dir", defaultVaultDir(), "vault directory")
 	passwordFile := fs.String("password-file", "", "password file path")
+	verbose := fs.Bool("v", false, "verbose output")
+	fs.BoolVar(verbose, "verbose", false, "verbose output")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -57,6 +59,7 @@ func runVault(args []string) error {
 	if err != nil {
 		return err
 	}
+	webrtc.SetVerbose(*verbose)
 	switch args[0] {
 	case "init":
 		_, err := os.Stat(filepath.Join(vdir, "manifest.json"))
@@ -94,15 +97,12 @@ func runVault(args []string) error {
 			return fmt.Errorf("usage: valetfs vault pair <session_id> [--signaling URL]")
 		}
 		sid := args[1]
-		signaling := os.Getenv("VALETFS_SIGNALING")
+		signaling := defaultSignalingURL()
 		for i := 2; i < len(args); i++ {
 			if args[i] == "--signaling" && i+1 < len(args) {
 				signaling = args[i+1]
 				i++
 			}
-		}
-		if signaling == "" {
-			return fmt.Errorf("missing signaling URL (--signaling or VALETFS_SIGNALING)")
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -140,7 +140,7 @@ func runVault(args []string) error {
 			return fmt.Errorf("usage: valetfs vault unmount <session_id> [--signaling URL]")
 		}
 		sid := args[1]
-		signaling := os.Getenv("VALETFS_SIGNALING")
+		signaling := defaultSignalingURL()
 		for i := 2; i < len(args); i++ {
 			if args[i] == "--signaling" && i+1 < len(args) {
 				signaling = args[i+1]
@@ -151,9 +151,6 @@ func runVault(args []string) error {
 			if rec, err := vault.LoadSession(vdir, sid); err == nil {
 				signaling = rec.SignalingURL
 			}
-		}
-		if signaling == "" {
-			return fmt.Errorf("missing signaling URL")
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -170,7 +167,7 @@ func runVault(args []string) error {
 			return fmt.Errorf("usage: valetfs vault sync <session_id> [--signaling URL]")
 		}
 		sid := args[1]
-		signaling := os.Getenv("VALETFS_SIGNALING")
+		signaling := defaultSignalingURL()
 		for i := 2; i < len(args); i++ {
 			if args[i] == "--signaling" && i+1 < len(args) {
 				signaling = args[i+1]
@@ -181,9 +178,6 @@ func runVault(args []string) error {
 			if rec, err := vault.LoadSession(vdir, sid); err == nil {
 				signaling = rec.SignalingURL
 			}
-		}
-		if signaling == "" {
-			return fmt.Errorf("missing signaling URL")
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -208,7 +202,7 @@ func runVault(args []string) error {
 	case "status":
 		if len(args) >= 2 {
 			sid := args[1]
-			signaling := os.Getenv("VALETFS_SIGNALING")
+			signaling := defaultSignalingURL()
 			for i := 2; i < len(args); i++ {
 				if args[i] == "--signaling" && i+1 < len(args) {
 					signaling = args[i+1]
@@ -219,9 +213,6 @@ func runVault(args []string) error {
 				if rec, err := vault.LoadSession(vdir, sid); err == nil {
 					signaling = rec.SignalingURL
 				}
-			}
-			if signaling == "" {
-				return fmt.Errorf("missing signaling URL")
 			}
 			p, err := webrtc.NewController()
 			if err != nil {
@@ -271,4 +262,11 @@ func defaultVaultDir() string {
 		return "/tmp/valetfs-vault"
 	}
 	return filepath.Join(home, ".valetfs", "vault")
+}
+
+func defaultSignalingURL() string {
+	if v := os.Getenv("VALETFS_SIGNALING"); v != "" {
+		return v
+	}
+	return "https://valetfs-signaling.winm2m.workers.dev"
 }
