@@ -119,6 +119,34 @@ valetfs status</code></pre>
       The daemon starts a local control API and WebDAV endpoint on loopback,
       and keeps running even when FUSE mounting is unavailable.
     </p>
+
+    <h2>Two-Device Pairing Test (Vault + Serve)</h2>
+    <p>
+      You can validate the new vault-origin workflow with two machines: one runs
+      <code>serve</code> as remote daemon, the other runs <code>vault</code> as controller.
+    </p>
+
+    <p><strong>Device A (serve target)</strong></p>
+    <pre><code>valetfs serve --signaling https://valetfs-signaling.winm2m.workers.dev</code></pre>
+    <p>
+      Keep this process running and copy the printed <code>Session ID: ...</code> value.
+    </p>
+
+    <p><strong>Device B (vault origin/controller)</strong></p>
+    <pre><code>export VALETFS_VAULT_PASSWORD='change-me'
+valetfs vault init
+valetfs vault add ./my-key.pem fs:/keys/my-key.pem
+valetfs vault pair &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.winm2m.workers.dev</code></pre>
+
+    <p>Optional follow-up commands:</p>
+    <pre><code>valetfs vault sync &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.winm2m.workers.dev
+valetfs vault status &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.winm2m.workers.dev
+valetfs vault unmount &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.winm2m.workers.dev</code></pre>
+
+    <p>
+      If follow-up commands time out when reconnecting to the same session, create a
+      new serve session and pair again.
+    </p>
   </main>
 </body>
 </html>

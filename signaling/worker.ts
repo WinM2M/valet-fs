@@ -102,7 +102,9 @@ export default {
       const offerRaw = await env.VALETFS_KV.get(`offer:${id}`);
       if (!offerRaw) return new Response("not found", { status: 404 });
       const claimed = await env.VALETFS_KV.get(`tok:controller:${id}`);
-      if (claimed) return json({ error: "already claimed" }, 409);
+      if (claimed) {
+        return json({ controller_token: claimed, offer: JSON.parse(offerRaw) });
+      }
       const controllerToken = randomToken();
       await env.VALETFS_KV.put(`tok:controller:${id}`, controllerToken, { expirationTtl: TTL_SECONDS });
       return json({ controller_token: controllerToken, offer: JSON.parse(offerRaw) });

@@ -135,6 +135,7 @@ func (p *Peer) CreateOffer() (webrtc.SessionDescription, error) {
 	if err := p.pc.SetLocalDescription(offer); err != nil {
 		return offer, err
 	}
+	<-webrtc.GatheringCompletePromise(p.pc)
 	return *p.pc.LocalDescription(), nil
 }
 
@@ -155,6 +156,7 @@ func (p *Peer) AcceptOfferAndAnswer(offer webrtc.SessionDescription) (webrtc.Ses
 	if err := p.pc.SetLocalDescription(answer); err != nil {
 		return webrtc.SessionDescription{}, err
 	}
+	<-webrtc.GatheringCompletePromise(p.pc)
 	return *p.pc.LocalDescription(), nil
 }
 
@@ -213,6 +215,7 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 	qrterminal.GenerateHalfBlock(
 		fmt.Sprintf("valetfs://pair?session=%s&url=%s", created.SessionID, signalingURL),
 		qrterminal.L, os.Stdout)
+	fmt.Printf("Session ID: %s\n", created.SessionID)
 	fmt.Println("Scan with the ValetFS mobile app to pair.")
 
 	// Long-poll the Worker for the remote answer.

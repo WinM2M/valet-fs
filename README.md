@@ -93,6 +93,45 @@ curl -X POST http://127.0.0.1:8080/sync
 The daemon prints an ASCII QR code; scan it from the ValetFS mobile app to
 complete WebRTC pairing.
 
+## Two-device Vault Pairing (CLI to CLI)
+
+You can test vault-origin and remote serve pairing without mobile app.
+
+Prerequisites:
+
+* Both devices can access the same Cloudflare Worker signaling URL.
+* Vault device has `VALETFS_VAULT_PASSWORD` set (or use `--password-file`).
+
+Device A (remote target, run daemon):
+
+```sh
+valetfs serve --signaling https://valetfs-signaling.winm2m.workers.dev
+```
+
+The daemon prints `Session ID: <id>` in stdout.
+
+Device B (vault origin/controller):
+
+```sh
+export VALETFS_VAULT_PASSWORD='change-me'
+valetfs vault init
+valetfs vault add ./my-key.pem fs:/keys/my-key.pem
+valetfs vault pair <SESSION_ID> --signaling https://valetfs-signaling.winm2m.workers.dev
+```
+
+After pairing, the vault file is pushed to Device A memory FS via WebRTC DataChannel.
+
+Optional follow-up commands:
+
+```sh
+valetfs vault sync <SESSION_ID> --signaling https://valetfs-signaling.winm2m.workers.dev
+valetfs vault status <SESSION_ID> --signaling https://valetfs-signaling.winm2m.workers.dev
+valetfs vault unmount <SESSION_ID> --signaling https://valetfs-signaling.winm2m.workers.dev
+```
+
+Note: current implementation is optimized for first controller pairing per session.
+For repeated `status/sync/unmount`, create a fresh serve session if rejoin times out.
+
 ## Local CLI (separate process)
 
 `valetfs` also supports local helper commands that connect to the running daemon
