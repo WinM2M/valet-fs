@@ -7,6 +7,7 @@ require (
 	github.com/google/uuid v1.3.1
 	github.com/joho/godotenv v1.5.1
 	github.com/mdp/qrterminal/v3 v3.2.0
+	github.com/pion/ice/v2 v2.3.11
 	github.com/pion/webrtc/v3 v3.2.24
 	github.com/winfsp/cgofuse v1.5.0
 	golang.org/x/crypto v0.16.0
@@ -29,7 +30,6 @@ require (
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
 	github.com/pion/datachannel v1.5.5 // indirect
 	github.com/pion/dtls/v2 v2.2.7 // indirect
-	github.com/pion/ice/v2 v2.3.11 // indirect
 	github.com/pion/interceptor v0.1.25 // indirect
 	github.com/pion/logging v0.2.2 // indirect
 	github.com/pion/mdns v0.0.8 // indirect

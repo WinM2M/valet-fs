@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
+	"github.com/pion/ice/v2"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -32,6 +34,7 @@ type Peer struct {
 
 var verboseLogging bool
 
+// SetVerbose enables (-v) diagnostic logging across all peers.
 func SetVerbose(v bool) { verboseLogging = v }
 
 func vlogf(format string, a ...any) {
@@ -40,32 +43,71 @@ func vlogf(format string, a ...any) {
 	}
 }
 
-// New constructs a Peer with sane defaults (STUN + TURN-fallback friendly).
-func New() (*Peer, error) {
-	cfg := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-		},
+// defaultICEServers returns the bootstrap STUN list used before any
+// signaling-provided TURN credentials are merged in.
+func defaultICEServers() []webrtc.ICEServer {
+	return []webrtc.ICEServer{
+		{URLs: []string{"stun:stun.l.google.com:19302"}},
 	}
-	pc, err := webrtc.NewPeerConnection(cfg)
+}
+
+// buildAPI constructs a webrtc.API with a SettingEngine that enables both
+// UDP and TCP ICE candidate gathering. Without explicitly listing TCP4/TCP6
+// network types here pion will not gather TURN-over-TCP relay candidates,
+// which are essential when the local network blocks UDP.
+func buildAPI() *webrtc.API {
+	s := webrtc.SettingEngine{}
+	s.SetNetworkTypes([]webrtc.NetworkType{
+		webrtc.NetworkTypeUDP4,
+		webrtc.NetworkTypeUDP6,
+		webrtc.NetworkTypeTCP4,
+		webrtc.NetworkTypeTCP6,
+	})
+	// Provide a passive TCP mux so the gatherer can produce active TCP
+	// candidates as well; required for turn:...?transport=tcp relay flow.
+	if tcpListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4zero, Port: 0}); err == nil {
+		s.SetICETCPMux(webrtc.NewICETCPMux(nil, tcpListener, 8))
+	}
+	// Disable mDNS so candidates carry routable addresses (mDNS .local
+	// names confuse strict-NAT TURN-only paths).
+	s.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	return webrtc.NewAPI(webrtc.WithSettingEngine(s))
+}
+
+var sharedAPI = buildAPI()
+
+// newPeer constructs a PeerConnection with the provided ICE servers baked in
+// at construction time. This is critical: pion only gathers relay candidates
+// from servers known at gatherer-creation, so TURN must be merged here, not
+// via SetConfiguration later.
+func newPeer(role string, servers []webrtc.ICEServer, relayOnly bool) (*Peer, error) {
+	if len(servers) == 0 {
+		servers = defaultICEServers()
+	}
+	cfg := webrtc.Configuration{ICEServers: servers}
+	if relayOnly {
+		cfg.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+	pc, err := sharedAPI.NewPeerConnection(cfg)
 	if err != nil {
 		return nil, err
 	}
+	p := &Peer{pc: pc, role: role}
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
-		vlogf("ice state=%s", s.String())
+		vlogf("ice state=%s role=%s", s.String(), role)
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
-		vlogf("peer state=%s", s.String())
+		vlogf("peer state=%s role=%s", s.String(), role)
+		if s == webrtc.PeerConnectionStateConnected {
+			p.logSelectedPair()
+		}
 	})
-	return &Peer{pc: pc, role: "daemon"}, nil
+	return p, nil
 }
 
-func (p *Peer) applyICEServers(servers []webrtc.ICEServer) error {
-	if len(servers) == 0 {
-		return nil
-	}
-	return p.pc.SetConfiguration(webrtc.Configuration{ICEServers: servers})
-}
+// New retains the old zero-config constructor for callers that have not yet
+// migrated to the ICE-aware path. Prefer NewDaemon/NewController.
+func New() (*Peer, error) { return newPeer("daemon", nil, false) }
 
 func fetchICEServers(signalingURL, sessionID, token string) ([]webrtc.ICEServer, error) {
 	req, _ := http.NewRequest(http.MethodGet, strings.TrimRight(signalingURL, "/")+"/sessions/"+sessionID+"/turn", nil)
@@ -89,8 +131,20 @@ func fetchICEServers(signalingURL, sessionID, token string) ([]webrtc.ICEServer,
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
-	servers := make([]webrtc.ICEServer, 0, len(out.IceServers))
-	for _, s := range out.IceServers {
+	servers := normalizeICEServers(out.IceServers)
+	return servers, nil
+}
+
+// normalizeICEServers converts the loosely-typed signaling representation
+// (urls may be a string or array, credential fields optional) into pion's
+// strict ICEServer struct. Empty entries are dropped.
+func normalizeICEServers(in []struct {
+	URLs       any    `json:"urls"`
+	Username   string `json:"username"`
+	Credential string `json:"credential"`
+}) []webrtc.ICEServer {
+	servers := make([]webrtc.ICEServer, 0, len(in))
+	for _, s := range in {
 		urls := make([]string, 0)
 		switch v := s.URLs.(type) {
 		case string:
@@ -105,21 +159,84 @@ func fetchICEServers(signalingURL, sessionID, token string) ([]webrtc.ICEServer,
 		if len(urls) == 0 {
 			continue
 		}
-		servers = append(servers, webrtc.ICEServer{URLs: urls, Username: s.Username, Credential: s.Credential, CredentialType: webrtc.ICECredentialTypePassword})
+		es := webrtc.ICEServer{URLs: urls}
+		if s.Username != "" || s.Credential != "" {
+			es.Username = s.Username
+			es.Credential = s.Credential
+			es.CredentialType = webrtc.ICECredentialTypePassword
+		}
+		servers = append(servers, es)
 	}
-	return servers, nil
+	return servers
 }
 
-// NewDaemon creates offerer-side peer for valetfs serve.
-func NewDaemon() (*Peer, error) { return New() }
+// fetchICEServersBootstrap retrieves ICE servers without a session/token. Used
+// before NewPeerConnection so that TURN credentials can be merged in at
+// construction time. For now it falls back to STUN-only since the existing
+// /turn endpoint requires a role token; the daemon path obtains TURN after
+// session creation via reset (see NewDaemonWithICE).
+func fetchICEServersBootstrap(signalingURL string) []webrtc.ICEServer {
+	_ = signalingURL
+	return defaultICEServers()
+}
 
-// NewController creates answerer-side peer for valetfs vault pair.
+// NewDaemon creates an offerer-side peer for `valetfs serve`. The peer is
+// constructed with bootstrap STUN servers; TURN credentials are fetched after
+// the session id is known and the peer is rebuilt via WithICE.
+func NewDaemon() (*Peer, error) { return newPeer("daemon", defaultICEServers(), false) }
+
+// NewController creates an answerer-side peer for `valetfs vault pair`.
 func NewController() (*Peer, error) {
-	p, err := New()
+	p, err := newPeer("controller", defaultICEServers(), false)
 	if err != nil {
 		return nil, err
 	}
-	p.role = "controller"
+	p.attachOnDataChannel()
+	return p, nil
+}
+
+// rebuildWithICE closes the existing PeerConnection and recreates it with
+// the supplied ICE servers baked in. Must be called before CreateOffer or
+// AcceptOfferAndAnswer to ensure relay candidates are gathered.
+func (p *Peer) rebuildWithICE(servers []webrtc.ICEServer, relayOnly bool) error {
+	if p.pc != nil {
+		_ = p.pc.Close()
+	}
+	cfg := webrtc.Configuration{ICEServers: servers}
+	if relayOnly {
+		cfg.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+	pc, err := sharedAPI.NewPeerConnection(cfg)
+	if err != nil {
+		return err
+	}
+	p.pc = pc
+	role := p.role
+	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
+		vlogf("ice state=%s role=%s", s.String(), role)
+	})
+	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		vlogf("peer state=%s role=%s", s.String(), role)
+		if s == webrtc.PeerConnectionStateConnected {
+			p.logSelectedPair()
+		}
+	})
+	if p.role == "controller" {
+		p.attachOnDataChannel()
+	}
+	if p.onICE != nil {
+		fn := p.onICE
+		p.pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+			if c == nil {
+				return
+			}
+			fn(c.ToJSON())
+		})
+	}
+	return nil
+}
+
+func (p *Peer) attachOnDataChannel() {
 	p.pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		p.mu.Lock()
 		p.dc = dc
@@ -140,7 +257,48 @@ func NewController() (*Peer, error) {
 			}
 		})
 	})
-	return p, nil
+}
+
+// logSelectedPair walks the stats report and prints the negotiated candidate
+// pair (host/srflx/relay + addresses). Invaluable for diagnosing why a
+// particular network failed P2P.
+func (p *Peer) logSelectedPair() {
+	if !verboseLogging || p.pc == nil {
+		return
+	}
+	stats := p.pc.GetStats()
+	var (
+		pairID    string
+		localID   string
+		remoteID  string
+		localStr  string
+		remoteStr string
+	)
+	for _, s := range stats {
+		if cp, ok := s.(webrtc.ICECandidatePairStats); ok {
+			if cp.Nominated && cp.State == webrtc.StatsICECandidatePairStateSucceeded {
+				pairID = cp.ID
+				localID = cp.LocalCandidateID
+				remoteID = cp.RemoteCandidateID
+				break
+			}
+		}
+	}
+	for _, s := range stats {
+		if c, ok := s.(webrtc.ICECandidateStats); ok {
+			if c.ID == localID {
+				localStr = fmt.Sprintf("%s/%s:%d (%s)", c.CandidateType, c.IP, c.Port, c.Protocol)
+			}
+			if c.ID == remoteID {
+				remoteStr = fmt.Sprintf("%s/%s:%d (%s)", c.CandidateType, c.IP, c.Port, c.Protocol)
+			}
+		}
+	}
+	if pairID != "" {
+		vlogf("selected pair role=%s local=%s remote=%s", p.role, localStr, remoteStr)
+	} else {
+		vlogf("selected pair role=%s not-found", p.role)
+	}
 }
 
 // OnData registers a callback invoked for each inbound DataChannel message.
@@ -168,8 +326,10 @@ func (p *Peer) AddRemoteCandidate(c webrtc.ICECandidateInit) error {
 	return p.pc.AddICECandidate(c)
 }
 
-// CreateOffer creates the "valetfs" DataChannel, generates an SDP offer and
-// returns the local description encoded for transport to the signaling layer.
+// CreateOffer creates the "valetfs" DataChannel and returns the local
+// description as soon as SetLocalDescription completes. Trickle ICE
+// candidates are delivered out-of-band via the signaling /candidates
+// endpoint; we deliberately do NOT wait for gathering to complete.
 func (p *Peer) CreateOffer() (webrtc.SessionDescription, error) {
 	dc, err := p.pc.CreateDataChannel("valetfs", nil)
 	if err != nil {
@@ -202,7 +362,6 @@ func (p *Peer) CreateOffer() (webrtc.SessionDescription, error) {
 	if err := p.pc.SetLocalDescription(offer); err != nil {
 		return offer, err
 	}
-	<-webrtc.GatheringCompletePromise(p.pc)
 	return *p.pc.LocalDescription(), nil
 }
 
@@ -212,6 +371,8 @@ func (p *Peer) AcceptAnswer(answer webrtc.SessionDescription) error {
 }
 
 // AcceptOfferAndAnswer applies remote offer and returns local answer.
+// As with CreateOffer, gathering proceeds in the background and candidates
+// are trickled separately.
 func (p *Peer) AcceptOfferAndAnswer(offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
 	if err := p.pc.SetRemoteDescription(offer); err != nil {
 		return webrtc.SessionDescription{}, err
@@ -223,7 +384,6 @@ func (p *Peer) AcceptOfferAndAnswer(offer webrtc.SessionDescription) (webrtc.Ses
 	if err := p.pc.SetLocalDescription(answer); err != nil {
 		return webrtc.SessionDescription{}, err
 	}
-	<-webrtc.GatheringCompletePromise(p.pc)
 	return *p.pc.LocalDescription(), nil
 }
 
@@ -246,31 +406,38 @@ func (p *Peer) Close() error {
 	return p.pc.Close()
 }
 
-// Bootstrap is the high-level helper used by production mode: it posts the
-// offer to the Cloudflare Worker, prints an ASCII QR code containing the
-// session id, then long-polls for the mobile app's answer.
+// Bootstrap is the high-level helper used by the daemon (offerer) side. It
+// creates a session, fetches TURN credentials, rebuilds the PeerConnection
+// with those credentials baked in, posts the offer, prints a QR code, then
+// long-polls for the controller's answer while exchanging trickle candidates.
 func (p *Peer) Bootstrap(signalingURL string) error {
 	if signalingURL == "" {
 		return fmt.Errorf("webrtc: signaling URL is empty")
 	}
+	signalingURL = strings.TrimRight(signalingURL, "/")
 
 	vlogf("bootstrap start signaling=%s", signalingURL)
-	offer, err := p.CreateOffer()
-	if err != nil {
-		return fmt.Errorf("create offer: %w", err)
-	}
 
-	signalingURL = strings.TrimRight(signalingURL, "/")
-	payload, _ := json.Marshal(map[string]any{"role": "daemon", "offer": offer})
-	resp, err := http.Post(signalingURL+"/sessions", "application/json", bytes.NewReader(payload))
+	// Step 1: allocate a session id + daemon token + iceServers in one
+	// round-trip. The /sessions endpoint in init mode does NOT require an
+	// offer; this lets us build the PeerConnection with TURN credentials
+	// baked in from the very first ICE gathering pass, so every candidate
+	// (host/srflx/relay) is emitted under a single, stable ufrag/pwd.
+	initPayload, _ := json.Marshal(map[string]any{"role": "daemon", "init": true})
+	resp, err := http.Post(signalingURL+"/sessions", "application/json", bytes.NewReader(initPayload))
 	if err != nil {
-		return fmt.Errorf("post offer: %w", err)
+		return fmt.Errorf("post session init: %w", err)
 	}
-	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	var created struct {
-		SessionID string `json:"session_id"`
-		Token     string `json:"daemon_token"`
+		SessionID  string `json:"session_id"`
+		Token      string `json:"daemon_token"`
+		ICEServers []struct {
+			URLs       any    `json:"urls"`
+			Username   string `json:"username"`
+			Credential string `json:"credential"`
+		} `json:"iceServers"`
 	}
 	if err := json.Unmarshal(body, &created); err != nil {
 		return fmt.Errorf("decode session: %w", err)
@@ -279,26 +446,45 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 		return fmt.Errorf("signaling did not return a session id")
 	}
 	vlogf("session created id=%s", created.SessionID)
-	if iceServers, err := fetchICEServers(signalingURL, created.SessionID, created.Token); err == nil {
-		if err := p.applyICEServers(iceServers); err == nil {
-			vlogf("applied ice servers from signaling count=%d", len(iceServers))
+
+	// Step 2: rebuild peer with the iceServers we just received. If the
+	// init response omitted them (legacy worker), fall back to the
+	// authenticated /turn endpoint.
+	iceServers := normalizeICEServers(created.ICEServers)
+	if len(iceServers) == 0 {
+		if servers, err := fetchICEServers(signalingURL, created.SessionID, created.Token); err == nil && len(servers) > 0 {
+			iceServers = servers
+		} else {
+			iceServers = defaultICEServers()
 		}
-	} else {
-		vlogf("turn fetch skipped: %v", err)
+	}
+	vlogf("turn fetched count=%d", len(iceServers))
+	if err := p.rebuildWithICE(iceServers, false); err != nil {
+		return fmt.Errorf("rebuild with ice: %w", err)
 	}
 
-	// Render QR code to terminal.
+	// Step 3: register the candidate exchange BEFORE creating the offer so
+	// that we capture every gathered candidate from t=0.
+	if err := p.startCandidateExchange(signalingURL, created.SessionID, created.Token, "daemon"); err != nil {
+		return err
+	}
+	vlogf("candidate exchange started role=daemon")
+
+	// Step 4: create the offer on the TURN-aware peer and publish it.
+	realOffer, err := p.CreateOffer()
+	if err != nil {
+		return fmt.Errorf("create offer: %w", err)
+	}
+	if err := postOfferUpdate(signalingURL, created.SessionID, created.Token, realOffer); err != nil {
+		return fmt.Errorf("post offer: %w", err)
+	}
+
 	qrterminal.GenerateHalfBlock(
 		fmt.Sprintf("valetfs://pair?session=%s&url=%s", created.SessionID, signalingURL),
 		qrterminal.L, os.Stdout)
 	fmt.Printf("Session ID: %s\n", created.SessionID)
 	fmt.Println("Scan with the ValetFS mobile app to pair.")
 
-	// Long-poll the Worker for the remote answer.
-	if err := p.startCandidateExchange(signalingURL, created.SessionID, created.Token, "daemon"); err != nil {
-		return err
-	}
-	vlogf("candidate exchange started role=daemon")
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequest(http.MethodGet, signalingURL+"/sessions/"+created.SessionID+"/answer", nil)
@@ -325,7 +511,25 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 	return fmt.Errorf("webrtc: timed out waiting for mobile pairing")
 }
 
-// Join claims a daemon session as controller, exchanges SDP answer and connects.
+func postOfferUpdate(signalingURL, sessionID, token string, offer webrtc.SessionDescription) error {
+	body, _ := json.Marshal(map[string]any{"offer": offer})
+	req, _ := http.NewRequest(http.MethodPost, signalingURL+"/sessions/"+sessionID+"/offer", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Valet-Role-Token", token)
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+	if r.StatusCode >= 300 {
+		b, _ := io.ReadAll(r.Body)
+		return fmt.Errorf("%s", strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+// Join claims a daemon session as controller, fetches TURN, rebuilds the
+// peer with TURN baked in, exchanges SDP answer and connects.
 func (p *Peer) Join(signalingURL, sessionID string) error {
 	if signalingURL == "" || sessionID == "" {
 		return fmt.Errorf("webrtc: signaling URL and session ID are required")
@@ -354,13 +558,20 @@ func (p *Peer) Join(signalingURL, sessionID string) error {
 		return fmt.Errorf("missing controller token")
 	}
 	vlogf("claim success session=%s", sessionID)
-	if iceServers, err := fetchICEServers(signalingURL, sessionID, claimed.ControllerToken); err == nil {
-		if err := p.applyICEServers(iceServers); err == nil {
-			vlogf("applied ice servers from signaling count=%d", len(iceServers))
-		}
-	} else {
+
+	// Fetch TURN and rebuild the peer BEFORE producing the answer so relay
+	// candidates are actually gathered.
+	iceServers := defaultICEServers()
+	if servers, err := fetchICEServers(signalingURL, sessionID, claimed.ControllerToken); err == nil && len(servers) > 0 {
+		iceServers = servers
+		vlogf("turn fetched count=%d", len(servers))
+	} else if err != nil {
 		vlogf("turn fetch skipped: %v", err)
 	}
+	if err := p.rebuildWithICE(iceServers, false); err != nil {
+		return fmt.Errorf("rebuild with ice: %w", err)
+	}
+
 	if err := p.startCandidateExchange(signalingURL, sessionID, claimed.ControllerToken, "controller"); err != nil {
 		return err
 	}
@@ -386,7 +597,7 @@ func (p *Peer) Join(signalingURL, sessionID string) error {
 	}
 	vlogf("answer posted session=%s", sessionID)
 
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		state := p.pc.ConnectionState()
 		if state == webrtc.PeerConnectionStateConnected {
@@ -400,7 +611,17 @@ func (p *Peer) Join(signalingURL, sessionID string) error {
 
 func (p *Peer) startCandidateExchange(signalingURL, sessionID, token, role string) error {
 	p.OnICECandidate(func(c webrtc.ICECandidateInit) {
-		vlogf("local candidate gathered role=%s", role)
+		ct := "unknown"
+		if c.Candidate != "" {
+			parts := strings.Fields(c.Candidate)
+			for i, x := range parts {
+				if x == "typ" && i+1 < len(parts) {
+					ct = parts[i+1]
+					break
+				}
+			}
+		}
+		vlogf("local candidate gathered role=%s type=%s", role, ct)
 		body, _ := json.Marshal(map[string]any{"candidates": []webrtc.ICECandidateInit{c}})
 		req, _ := http.NewRequest(http.MethodPost, signalingURL+"/sessions/"+sessionID+"/candidates", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -433,13 +654,22 @@ func (p *Peer) startCandidateExchange(signalingURL, sessionID, token, role strin
 			_ = json.NewDecoder(resp.Body).Decode(&out)
 			resp.Body.Close()
 			for _, c := range out.Candidates {
-				vlogf("remote candidate received role=%s", role)
+				ct := "unknown"
+				if c.Candidate != "" {
+					parts := strings.Fields(c.Candidate)
+					for i, x := range parts {
+						if x == "typ" && i+1 < len(parts) {
+							ct = parts[i+1]
+							break
+						}
+					}
+				}
+				vlogf("remote candidate received role=%s type=%s", role, ct)
 				_ = p.AddRemoteCandidate(c)
 			}
 			since = out.Next
 			time.Sleep(200 * time.Millisecond)
 		}
 	}()
-	_ = role
 	return nil
 }

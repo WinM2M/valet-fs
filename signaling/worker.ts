@@ -15,8 +15,18 @@
 
 export interface Env {
   VALETFS_KV: KVNamespace;
+  // Legacy HMAC-secret mode (coturn-style auth-secret). Kept for self-hosted
+  // deployments. Ignored when METERED_API_KEY is present.
   TURN_DOMAIN?: string;
   TURN_SECRET?: string;
+  // Preferred: Metered REST API pass-through. The Worker calls
+  //   https://{METERED_APP}.metered.live/api/v1/turn/credentials?apiKey=...
+  // and returns the iceServers array verbatim. This is the only mode that
+  // is guaranteed to interoperate with Metered's production TURN cluster
+  // (standard.relay.metered.ca et al.) because credentials are minted by
+  // Metered itself rather than computed via shared-secret HMAC.
+  METERED_APP?: string;
+  METERED_API_KEY?: string;
 }
 
 const TTL_SECONDS = 300; // 5 minutes
@@ -89,11 +99,37 @@ async function buildIceServers(env: Env): Promise<Array<Record<string, unknown>>
   const out: Array<Record<string, unknown>> = [
     { urls: ["stun:stun.l.google.com:19302"] },
   ];
+
+  // Preferred path: Metered REST API. Returns iceServers minted by Metered
+  // for the correct production TURN cluster, with credentials that the
+  // server will actually accept.
+  const app = (env.METERED_APP || "").trim();
+  const apiKey = (env.METERED_API_KEY || "").trim();
+  if (app && apiKey) {
+    try {
+      const r = await fetch(
+        `https://${app}.metered.live/api/v1/turn/credentials?apiKey=${encodeURIComponent(apiKey)}`,
+      );
+      if (r.ok) {
+        const arr = (await r.json()) as Array<Record<string, unknown>>;
+        if (Array.isArray(arr) && arr.length > 0) {
+          for (const s of arr) out.push(s);
+          return out;
+        }
+      }
+    } catch (_e) {
+      // fall through to legacy HMAC path
+    }
+  }
+
+  // Legacy: coturn-style auth-secret HMAC. Only works when TURN_DOMAIN is a
+  // real TURN server (e.g. a self-hosted coturn) configured with the same
+  // shared secret.
   const domain = (env.TURN_DOMAIN || "").trim();
   const secret = (env.TURN_SECRET || "").trim();
   if (!domain || !secret) return out;
   const expiry = Math.floor(Date.now() / 1000) + 10 * 60;
-  const username = String(expiry);
+  const username = `${expiry}:valetfs`;
   const credential = await makeTurnCredential(secret, username);
   out.push({
     urls: [
@@ -126,11 +162,22 @@ export default {
     }
 
     if (req.method === "POST" && parts.length === 1 && parts[0] === "sessions") {
-      const { offer, role } = (await req.json()) as { offer: unknown; role?: string };
+      const body = (await req.json().catch(() => ({}))) as { offer?: unknown; role?: string; init?: boolean };
+      const { offer, role, init } = body;
       if (role !== "daemon") return json({ error: "role must be daemon" }, 400);
-      if (!offer) return json({ error: "missing offer" }, 400);
       const id = randomID();
       const daemonToken = randomToken();
+      // Init mode: allocate session id + token + iceServers without an
+      // offer. The daemon constructs its PeerConnection knowing the TURN
+      // servers up-front (avoiding any later SetConfiguration race), then
+      // POSTs the real offer via /sessions/:id/offer.
+      if (init === true) {
+        await env.VALETFS_KV.put(`owner:${id}`, "daemon", { expirationTtl: TTL_SECONDS });
+        await env.VALETFS_KV.put(`tok:daemon:${id}`, daemonToken, { expirationTtl: TTL_SECONDS });
+        const iceServers = await buildIceServers(env);
+        return json({ session_id: id, daemon_token: daemonToken, ttl: TTL_SECONDS, iceServers });
+      }
+      if (!offer) return json({ error: "missing offer" }, 400);
       await env.VALETFS_KV.put(`offer:${id}`, JSON.stringify(offer), {
         expirationTtl: TTL_SECONDS,
       });
@@ -152,7 +199,7 @@ export default {
       return json({ controller_token: controllerToken, offer: JSON.parse(offerRaw) });
     }
 
-    if (parts[0] === "sessions" && parts.length === 3) {
+    if (parts[0] === "sessions" && parts.length === 3 && parts[2] !== "candidates") {
       const [, id, kind] = parts;
       if (kind === "turn" && req.method === "GET") {
         const dTok = await getToken(env, id, "daemon");
@@ -182,15 +229,36 @@ export default {
         });
         return new Response(null, { status: 204 });
       }
+      if (req.method === "POST" && kind === "offer") {
+        // Allow the daemon to replace its stored offer once it has fetched
+        // TURN credentials and rebuilt its PeerConnection. Only the daemon
+        // role may overwrite the offer.
+        const forbidden = await requireRoleToken(req, env, id, "daemon");
+        if (forbidden) return forbidden;
+        const { offer } = (await req.json()) as { offer: unknown };
+        if (!offer) return json({ error: "missing offer" }, 400);
+        await env.VALETFS_KV.put(`offer:${id}`, JSON.stringify(offer), {
+          expirationTtl: TTL_SECONDS,
+        });
+        return new Response(null, { status: 204 });
+      }
     }
 
     if (parts[0] === "sessions" && parts.length === 3 && parts[2] === "candidates") {
       const id = parts[1];
       const daemonToken = await getToken(env, id, "daemon");
       const ctrlToken = await getToken(env, id, "controller");
-      if (!daemonToken || !ctrlToken) return json({ error: "session not ready" }, 409);
       const header = req.headers.get("X-Valet-Role-Token") || "";
-      const role = header === daemonToken ? "daemon" : header === ctrlToken ? "controller" : "";
+      // POST is allowed as soon as the caller's own role token exists. The
+      // daemon starts trickling candidates *before* the controller claims
+      // the session; gating POST on both tokens caused every daemon
+      // candidate to be rejected with 409 until the controller joined,
+      // by which time gathering had already finished and the candidates
+      // were lost. GET still requires both tokens (otherwise there is no
+      // remote peer to read from).
+      let role = "";
+      if (header && header === daemonToken) role = "daemon";
+      else if (header && header === ctrlToken) role = "controller";
       if (!role) return json({ error: "forbidden" }, 403);
 
       if (req.method === "POST") {
@@ -208,6 +276,7 @@ export default {
       }
 
       if (req.method === "GET") {
+        if (!daemonToken || !ctrlToken) return json({ error: "session not ready" }, 409);
         const otherRole = role === "daemon" ? "controller" : "daemon";
         const key = `ice:${otherRole}:${id}`;
         const since = Number(url.searchParams.get("since") || "0");
