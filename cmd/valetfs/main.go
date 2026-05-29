@@ -38,8 +38,15 @@ type runtimeState struct {
 }
 
 var cliVerbose bool
+const cliVersion = "0.0.7"
 
 func main() {
+	if len(os.Args) > 1 {
+		if os.Args[1] == "--version" || os.Args[1] == "version" {
+			_, _ = fmt.Fprintf(os.Stdout, "v%s\n", cliVersion)
+			return
+		}
+	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "serve":
