@@ -15,6 +15,8 @@
 
 export interface Env {
   VALETFS_KV: KVNamespace;
+  TURN_DOMAIN?: string;
+  TURN_SECRET?: string;
 }
 
 const TTL_SECONDS = 300; // 5 minutes
@@ -67,6 +69,46 @@ async function requireRoleToken(req: Request, env: Env, id: string, role: "daemo
   return null;
 }
 
+async function makeTurnCredential(secret: string, username: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(username));
+  const bytes = new Uint8Array(sig);
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+
+async function buildIceServers(env: Env): Promise<Array<Record<string, unknown>>> {
+  const out: Array<Record<string, unknown>> = [
+    { urls: ["stun:stun.l.google.com:19302"] },
+  ];
+  const domain = (env.TURN_DOMAIN || "").trim();
+  const secret = (env.TURN_SECRET || "").trim();
+  if (!domain || !secret) return out;
+  const expiry = Math.floor(Date.now() / 1000) + 10 * 60;
+  const username = String(expiry);
+  const credential = await makeTurnCredential(secret, username);
+  out.push({
+    urls: [
+      `stun:${domain}:80`,
+      `turn:${domain}:80?transport=udp`,
+      `turn:${domain}:80?transport=tcp`,
+      `turn:${domain}:443?transport=tcp`,
+      `turns:${domain}:443?transport=tcp`,
+    ],
+    username,
+    credential,
+  });
+  return out;
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -112,6 +154,14 @@ export default {
 
     if (parts[0] === "sessions" && parts.length === 3) {
       const [, id, kind] = parts;
+      if (kind === "turn" && req.method === "GET") {
+        const dTok = await getToken(env, id, "daemon");
+        const cTok = await getToken(env, id, "controller");
+        const hdr = req.headers.get("X-Valet-Role-Token") || "";
+        if (!hdr || (hdr !== dTok && hdr !== cTok)) return json({ error: "forbidden" }, 403);
+        const iceServers = await buildIceServers(env);
+        return json({ iceServers, ttl_seconds: 600 });
+      }
       const key = `${kind}:${id}`;
       if (req.method === "GET") {
         if (kind === "answer") {

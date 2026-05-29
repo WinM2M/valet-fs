@@ -51,7 +51,63 @@ func New() (*Peer, error) {
 	if err != nil {
 		return nil, err
 	}
+	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
+		vlogf("ice state=%s", s.String())
+	})
+	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		vlogf("peer state=%s", s.String())
+	})
 	return &Peer{pc: pc, role: "daemon"}, nil
+}
+
+func (p *Peer) applyICEServers(servers []webrtc.ICEServer) error {
+	if len(servers) == 0 {
+		return nil
+	}
+	return p.pc.SetConfiguration(webrtc.Configuration{ICEServers: servers})
+}
+
+func fetchICEServers(signalingURL, sessionID, token string) ([]webrtc.ICEServer, error) {
+	req, _ := http.NewRequest(http.MethodGet, strings.TrimRight(signalingURL, "/")+"/sessions/"+sessionID+"/turn", nil)
+	req.Header.Set("X-Valet-Role-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("turn fetch failed: %s", strings.TrimSpace(string(b)))
+	}
+	var out struct {
+		IceServers []struct {
+			URLs       any    `json:"urls"`
+			Username   string `json:"username"`
+			Credential string `json:"credential"`
+		} `json:"iceServers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	servers := make([]webrtc.ICEServer, 0, len(out.IceServers))
+	for _, s := range out.IceServers {
+		urls := make([]string, 0)
+		switch v := s.URLs.(type) {
+		case string:
+			urls = append(urls, v)
+		case []any:
+			for _, x := range v {
+				if u, ok := x.(string); ok {
+					urls = append(urls, u)
+				}
+			}
+		}
+		if len(urls) == 0 {
+			continue
+		}
+		servers = append(servers, webrtc.ICEServer{URLs: urls, Username: s.Username, Credential: s.Credential, CredentialType: webrtc.ICECredentialTypePassword})
+	}
+	return servers, nil
 }
 
 // NewDaemon creates offerer-side peer for valetfs serve.
@@ -223,6 +279,13 @@ func (p *Peer) Bootstrap(signalingURL string) error {
 		return fmt.Errorf("signaling did not return a session id")
 	}
 	vlogf("session created id=%s", created.SessionID)
+	if iceServers, err := fetchICEServers(signalingURL, created.SessionID, created.Token); err == nil {
+		if err := p.applyICEServers(iceServers); err == nil {
+			vlogf("applied ice servers from signaling count=%d", len(iceServers))
+		}
+	} else {
+		vlogf("turn fetch skipped: %v", err)
+	}
 
 	// Render QR code to terminal.
 	qrterminal.GenerateHalfBlock(
@@ -291,6 +354,13 @@ func (p *Peer) Join(signalingURL, sessionID string) error {
 		return fmt.Errorf("missing controller token")
 	}
 	vlogf("claim success session=%s", sessionID)
+	if iceServers, err := fetchICEServers(signalingURL, sessionID, claimed.ControllerToken); err == nil {
+		if err := p.applyICEServers(iceServers); err == nil {
+			vlogf("applied ice servers from signaling count=%d", len(iceServers))
+		}
+	} else {
+		vlogf("turn fetch skipped: %v", err)
+	}
 	if err := p.startCandidateExchange(signalingURL, sessionID, claimed.ControllerToken, "controller"); err != nil {
 		return err
 	}

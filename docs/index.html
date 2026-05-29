@@ -51,7 +51,27 @@
       border: 1px solid var(--line);
       background: #fff;
       overflow-x: auto;
+      position: relative;
     }
+    .copy-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 32px;
+      height: 32px;
+      border: 1px solid #d6d0c4;
+      border-radius: 8px;
+      background: #fff;
+      color: #33524d;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+    .copy-btn:hover { background: #f3f7f6; border-color: #b8ccc7; }
+    .copy-btn:active { background: #eaf2f0; }
+    .copy-btn svg { width: 16px; height: 16px; }
     .badge {
       display: inline-block;
       margin-bottom: 10px;
@@ -158,5 +178,30 @@ valetfs vault unmount &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.w
     <pre><code>valetfs serve -v
 valetfs vault -v pair &lt;SESSION_ID&gt;</code></pre>
   </main>
+  <script>
+    (function () {
+      const icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+      document.querySelectorAll('pre').forEach((pre) => {
+        const code = pre.querySelector('code');
+        if (!code) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'copy-btn';
+        btn.innerHTML = icon;
+        btn.setAttribute('aria-label', 'Copy code');
+        btn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(code.innerText);
+            btn.style.borderColor = '#0f766e';
+            setTimeout(() => { btn.style.borderColor = '#d6d0c4'; }, 700);
+          } catch (_) {
+            btn.style.borderColor = '#b91c1c';
+            setTimeout(() => { btn.style.borderColor = '#d6d0c4'; }, 700);
+          }
+        });
+        pre.appendChild(btn);
+      });
+    })();
+  </script>
 </body>
 </html>

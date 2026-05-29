@@ -94,6 +94,25 @@ If `--signaling` is omitted, default signaling URL is:
 
 `https://valetfs-signaling.winm2m.workers.dev`
 
+### TURN credential security model
+
+`valetfs` does not embed TURN master keys in source or binaries.
+
+Cloudflare Worker issues short-lived TURN credentials through
+`GET /sessions/:id/turn` using Worker secrets:
+
+* `TURN_DOMAIN`
+* `TURN_SECRET`
+
+Set them via Wrangler (never commit plain keys):
+
+```sh
+cd signaling
+wrangler secret put TURN_DOMAIN
+wrangler secret put TURN_SECRET
+wrangler deploy
+```
+
 The daemon prints an ASCII QR code; scan it from the ValetFS mobile app to
 complete WebRTC pairing.
 
