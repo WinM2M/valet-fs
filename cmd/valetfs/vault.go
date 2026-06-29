@@ -21,7 +21,7 @@ func runVault(args []string) error {
 	fs.SetOutput(os.Stderr)
 	vdirFlag := fs.String("vault-dir", defaultVaultDir(), "vault directory")
 	passwordFile := fs.String("password-file", "", "password file path")
-	transportFlag := fs.String("transport", defaultVaultTransport(), "control-plane transport: webrtc|ws")
+	transportFlag := fs.String("transport", defaultVaultTransport(), "control-plane transport: ws (default)|webrtc")
 	verbose := fs.Bool("v", false, "verbose output")
 	fs.BoolVar(verbose, "verbose", false, "verbose output")
 	if err := fs.Parse(args); err != nil {
@@ -341,7 +341,7 @@ func defaultVaultTransport() string {
 	if v := os.Getenv("VALETFS_TRANSPORT"); v != "" {
 		return v
 	}
-	return "webrtc"
+	return "ws"
 }
 
 func defaultSignalingURL() string {

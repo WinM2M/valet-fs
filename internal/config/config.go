@@ -77,7 +77,7 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&cfg.SignalingURL, "signaling", defaultEnv("VALETFS_SIGNALING", "https://valetfs-signaling.winm2m.workers.dev"), "Cloudflare Worker signaling URL")
 	fs.StringVar(&cfg.GitTempDir, "git-dir", defaultEnv("VALETFS_GIT_DIR", defaultGitDir()), "Ephemeral go-git diff directory")
 
-	fs.StringVar(&cfg.Transport, "transport", defaultEnv("VALETFS_TRANSPORT", "webrtc"), "Control-plane transport: webrtc|ws")
+	fs.StringVar(&cfg.Transport, "transport", defaultEnv("VALETFS_TRANSPORT", "ws"), "Control-plane transport: ws (default)|webrtc")
 	fs.IntVar(&cfg.GraceSeconds, "grace", defaultEnvInt("VALETFS_GRACE", 300), "Seconds to keep VFS mounted after vault goes offline (ws transport; 0 = immediate)")
 
 	var quotaMB int64
