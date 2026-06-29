@@ -63,6 +63,13 @@ func New(cfg *config.Config) (*Daemon, error) {
 	}, nil
 }
 
+// Mounted reports whether the VFS is currently mounted/serving.
+func (d *Daemon) Mounted() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.mounted
+}
+
 // MemFS exposes the in-memory file system. Used by the WebRTC layer to ship
 // the canonical view of the cluster to paired mobile apps.
 func (d *Daemon) MemFS() *vfs.MemFS { return d.fs }

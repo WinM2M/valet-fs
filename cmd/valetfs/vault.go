@@ -21,6 +21,7 @@ func runVault(args []string) error {
 	fs.SetOutput(os.Stderr)
 	vdirFlag := fs.String("vault-dir", defaultVaultDir(), "vault directory")
 	passwordFile := fs.String("password-file", "", "password file path")
+	transportFlag := fs.String("transport", defaultVaultTransport(), "control-plane transport: webrtc|ws")
 	verbose := fs.Bool("v", false, "verbose output")
 	fs.BoolVar(verbose, "verbose", false, "verbose output")
 	if err := fs.Parse(args); err != nil {
@@ -120,6 +121,9 @@ func runVault(args []string) error {
 				i++
 			}
 		}
+		if *transportFlag == "ws" {
+			return vaultWSPair(v, vdir, signaling, sid)
+		}
 		p, err := webrtc.NewController()
 		if err != nil {
 			return err
@@ -151,6 +155,27 @@ func runVault(args []string) error {
 		_ = vault.SaveSession(vdir, vault.SessionRecord{SessionID: sid, SignalingURL: signaling, PairedAt: time.Now().UTC(), LastSeen: time.Now().UTC()})
 		_, _ = fmt.Fprintln(os.Stdout, "paired and pushed vault entries")
 		return nil
+	case "lock":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: valetfs vault lock <session_id> [--signaling URL]")
+		}
+		sid := args[1]
+		signaling := defaultSignalingURL()
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--signaling" && i+1 < len(args) {
+				signaling = args[i+1]
+				i++
+			}
+		}
+		if signaling == "" {
+			if rec, err := vault.LoadSession(vdir, sid); err == nil {
+				signaling = rec.SignalingURL
+			}
+		}
+		if *transportFlag != "ws" {
+			return fmt.Errorf("lock requires --transport ws")
+		}
+		return vaultWSSimple(signaling, sid, "LOCK")
 	case "unmount":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: valetfs vault unmount <session_id> [--signaling URL]")
@@ -167,6 +192,9 @@ func runVault(args []string) error {
 			if rec, err := vault.LoadSession(vdir, sid); err == nil {
 				signaling = rec.SignalingURL
 			}
+		}
+		if *transportFlag == "ws" {
+			return vaultWSSimple(signaling, sid, "UNMOUNT")
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -194,6 +222,9 @@ func runVault(args []string) error {
 			if rec, err := vault.LoadSession(vdir, sid); err == nil {
 				signaling = rec.SignalingURL
 			}
+		}
+		if *transportFlag == "ws" {
+			return vaultWSSync(v, signaling, sid)
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -229,6 +260,9 @@ func runVault(args []string) error {
 				if rec, err := vault.LoadSession(vdir, sid); err == nil {
 					signaling = rec.SignalingURL
 				}
+			}
+			if *transportFlag == "ws" {
+				return vaultWSStatus(signaling, sid)
 			}
 			p, err := webrtc.NewController()
 			if err != nil {
@@ -301,6 +335,13 @@ func defaultVaultDir() string {
 		return "/tmp/valetfs-vault"
 	}
 	return filepath.Join(home, ".valetfs", "vault")
+}
+
+func defaultVaultTransport() string {
+	if v := os.Getenv("VALETFS_TRANSPORT"); v != "" {
+		return v
+	}
+	return "webrtc"
 }
 
 func defaultSignalingURL() string {

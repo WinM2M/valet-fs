@@ -10,6 +10,8 @@
 package vfs
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"path"
@@ -41,10 +43,20 @@ type Node struct {
 
 // MemFS is a tiny thread-safe in-memory file system.
 type MemFS struct {
-	mu    sync.RWMutex
-	root  *Node
-	used  int64
-	quota int64
+	mu      sync.RWMutex
+	root    *Node
+	used    int64
+	quota   int64
+	version int64 // monotonically incremented on every mutation
+}
+
+// ManifestEntry summarises a single file for reconcile/diff purposes. It never
+// carries the file body, only a content hash and metadata.
+type ManifestEntry struct {
+	Path    string    `json:"path"`
+	SHA     string    `json:"sha"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mod_time"`
 }
 
 // New returns an empty MemFS with the given quota in bytes (0 = unlimited).
@@ -139,6 +151,7 @@ func (m *MemFS) Mkdir(p string, mode fs.FileMode) error {
 		Children: make(map[string]*Node),
 	}
 	parent.ModTime = time.Now()
+	m.version++
 	return nil
 }
 
@@ -167,6 +180,7 @@ func (m *MemFS) MkdirAll(p string, mode fs.FileMode) error {
 		}
 		cur = child
 	}
+	m.version++
 	return nil
 }
 
@@ -209,6 +223,7 @@ func (m *MemFS) Write(p string, data []byte, mode fs.FileMode) error {
 	}
 	parent.ModTime = time.Now()
 	m.used = m.used - oldSize + newSize
+	m.version++
 	return nil
 }
 
@@ -260,6 +275,7 @@ func (m *MemFS) Remove(p string) error {
 	}
 	delete(parent.Children, name)
 	parent.ModTime = time.Now()
+	m.version++
 	return nil
 }
 
@@ -303,6 +319,42 @@ func (m *MemFS) List(p string) ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// Version returns a counter that increases on every mutation. The reconcile
+// layer uses it to cheaply detect "has anything changed since I last looked".
+func (m *MemFS) Version() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.version
+}
+
+// Manifest returns one entry per file (path + content hash + metadata), sorted
+// by path. It deliberately omits file bodies so a peer can diff cheaply and
+// then PULL only the bodies it is missing.
+func (m *MemFS) Manifest() []ManifestEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]ManifestEntry, 0)
+	var walk func(prefix string, n *Node)
+	walk = func(prefix string, n *Node) {
+		if !n.IsDir {
+			sum := sha256.Sum256(n.Data)
+			out = append(out, ManifestEntry{
+				Path:    prefix,
+				SHA:     hex.EncodeToString(sum[:]),
+				Size:    int64(len(n.Data)),
+				ModTime: n.ModTime,
+			})
+			return
+		}
+		for name, child := range n.Children {
+			walk(path.Join(prefix, name), child)
+		}
+	}
+	walk("/", m.root)
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
 }
 
 // Snapshot returns a deep copy of every (path, content) pair.
@@ -359,6 +411,7 @@ func (m *MemFS) Wipe() {
 		Children: make(map[string]*Node),
 	}
 	m.used = 0
+	m.version++
 }
 
 func zeroBytes(b []byte) {

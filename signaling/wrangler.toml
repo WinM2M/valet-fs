@@ -6,3 +6,11 @@ account_id = "3c2cc4ee727d35d579f97cecbfca62b2"
 [[kv_namespaces]]
 binding = "VALETFS_KV"
 id = "ca0376fbe5714e009b6bf8b6f936a117"
+
+[[durable_objects.bindings]]
+name = "SESSION_HUB"
+class_name = "SessionHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionHub"]
