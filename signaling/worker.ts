@@ -188,11 +188,14 @@ export default {
       // POST /ws/sessions  {role:"daemon"} -> {session_id, daemon_token}
       if (req.method === "POST" && parts.length === 2 && parts[1] === "sessions") {
         await audit(req, "ws.sessions.create");
-        const body = (await req.json().catch(() => ({}))) as { role?: string };
+        const body = (await req.json().catch(() => ({}))) as { role?: string; pub?: string };
         if (body.role !== "daemon") return json({ error: "role must be daemon" }, 400);
         const sid = randomID();
         const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
-        const r = await stub.fetch("https://do/?do=create", { method: "POST" });
+        const r = await stub.fetch("https://do/?do=create", {
+          method: "POST",
+          body: JSON.stringify({ pub: body.pub || "" }),
+        });
         const { daemon_token } = (await r.json()) as { daemon_token: string };
         return json({ session_id: sid, daemon_token });
       }
@@ -406,7 +409,15 @@ export class SessionHub {
 
     if (action === "create") {
       const token = randomToken();
+      let pub = "";
+      try {
+        const b = (await req.json()) as { pub?: string };
+        pub = b.pub || "";
+      } catch {
+        // no body
+      }
       await this.state.storage.put("daemon_token", token);
+      if (pub) await this.state.storage.put("daemon_pub", pub);
       return new Response(JSON.stringify({ daemon_token: token }), {
         headers: { "content-type": "application/json" },
       });
@@ -418,7 +429,8 @@ export class SessionHub {
         token = randomToken();
         await this.state.storage.put("vault_token", token);
       }
-      return new Response(JSON.stringify({ controller_token: token }), {
+      const pub = (await this.state.storage.get<string>("daemon_pub")) || "";
+      return new Response(JSON.stringify({ controller_token: token, daemon_pub: pub }), {
         headers: { "content-type": "application/json" },
       });
     }

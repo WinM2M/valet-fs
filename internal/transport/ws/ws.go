@@ -81,13 +81,18 @@ func (c *Conn) readLoop() {
 }
 
 // DialDaemon creates a new session on the hub and connects as the daemon role.
+// daemonPubB64 (may be empty) is the X25519 public key published for E2EE.
 // It returns the connection (not yet started), the session id, and the token.
-func DialDaemon(hubURL string) (*Conn, string, error) {
+func DialDaemon(hubURL, daemonPubB64 string) (*Conn, string, error) {
 	var resp struct {
 		SessionID   string `json:"session_id"`
 		DaemonToken string `json:"daemon_token"`
 	}
-	if err := postJSON(hubURL+"/ws/sessions", map[string]any{"role": "daemon", "init": true}, &resp); err != nil {
+	body := map[string]any{"role": "daemon", "init": true}
+	if daemonPubB64 != "" {
+		body["pub"] = daemonPubB64
+	}
+	if err := postJSON(hubURL+"/ws/sessions", body, &resp); err != nil {
 		return nil, "", err
 	}
 	c, err := dialWS(hubURL, resp.SessionID, "daemon", resp.DaemonToken)
@@ -98,14 +103,21 @@ func DialDaemon(hubURL string) (*Conn, string, error) {
 }
 
 // DialController claims an existing session and connects as the vault role.
-func DialController(hubURL, sessionID string) (*Conn, error) {
+// It also returns the daemon's published X25519 public key (base64; may be
+// empty if the daemon did not enable E2EE).
+func DialController(hubURL, sessionID string) (*Conn, string, error) {
 	var resp struct {
 		ControllerToken string `json:"controller_token"`
+		DaemonPub       string `json:"daemon_pub"`
 	}
 	if err := postJSON(fmt.Sprintf("%s/ws/sessions/%s/claim", hubURL, sessionID), nil, &resp); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return dialWS(hubURL, sessionID, "vault", resp.ControllerToken)
+	c, err := dialWS(hubURL, sessionID, "vault", resp.ControllerToken)
+	if err != nil {
+		return nil, "", err
+	}
+	return c, resp.DaemonPub, nil
 }
 
 func dialWS(hubURL, sid, role, token string) (*Conn, error) {

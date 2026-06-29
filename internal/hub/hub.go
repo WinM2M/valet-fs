@@ -38,6 +38,7 @@ type session struct {
 	id        string
 	daemonTok string
 	vaultTok  string
+	daemonPub string                     // X25519 public key (base64) for E2EE
 	conns     map[string]*websocket.Conn // role -> conn
 }
 
@@ -94,13 +95,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Role string `json:"role"`
 		Init bool   `json:"init"`
+		Pub  string `json:"pub"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Role != roleDaemon {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "role must be daemon"})
 		return
 	}
-	sess := &session{id: s.idgen(), daemonTok: randomHex(), conns: map[string]*websocket.Conn{}}
+	sess := &session{id: s.idgen(), daemonTok: randomHex(), daemonPub: body.Pub, conns: map[string]*websocket.Conn{}}
 	s.mu.Lock()
 	s.sessions[sess.id] = sess
 	s.mu.Unlock()
@@ -121,8 +123,9 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		sess.vaultTok = randomHex()
 	}
 	tok := sess.vaultTok
+	pub := sess.daemonPub
 	sess.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"controller_token": tok})
+	writeJSON(w, http.StatusOK, map[string]any{"controller_token": tok, "daemon_pub": pub})
 }
 
 func (s *Server) handleWS(ws *websocket.Conn) {

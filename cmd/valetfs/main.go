@@ -28,10 +28,12 @@ import (
 
 	"github.com/anomalyco/valet-fs/internal/config"
 	"github.com/anomalyco/valet-fs/internal/daemon"
+	"github.com/anomalyco/valet-fs/internal/e2ee"
 	"github.com/anomalyco/valet-fs/internal/node"
 	"github.com/anomalyco/valet-fs/internal/transport/ws"
 	"github.com/anomalyco/valet-fs/internal/vfs"
 	"github.com/anomalyco/valet-fs/internal/webrtc"
+	"github.com/mdp/qrterminal/v3"
 )
 
 type runtimeState struct {
@@ -40,7 +42,7 @@ type runtimeState struct {
 }
 
 var cliVerbose bool
-const cliVersion = "0.1.3"
+const cliVersion = "0.1.4"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -122,11 +124,23 @@ func serve(args []string) {
 		log.Println("valetd: starting in DEV mode (no WebRTC)")
 	} else if cfg.Transport == "ws" {
 		log.Println("valetd: starting in PRODUCTION mode (ws transport)")
-		conn, sid, err := ws.DialDaemon(cfg.SignalingURL)
+		kp, err := e2ee.Generate()
+		if err != nil {
+			log.Fatalf("valetd: e2ee keygen: %v", err)
+		}
+		rawConn, sid, err := ws.DialDaemon(cfg.SignalingURL, kp.PubB64())
 		if err != nil {
 			log.Fatalf("valetd: ws dial: %v", err)
 		}
+		conn := e2ee.WrapDaemon(rawConn, kp)
+		// QR payload carries the E2EE public key (authenticated out-of-band by
+		// the scan), the session id, and the signaling URL.
+		qrPayload, _ := json.Marshal(map[string]any{
+			"v": 1, "sid": sid, "signaling": cfg.SignalingURL, "pub": kp.PubB64(),
+		})
+		qrterminal.GenerateHalfBlock(string(qrPayload), qrterminal.L, os.Stdout)
 		fmt.Printf("Session ID: %s\n", sid)
+		fmt.Println("Scan with the ValetFS mobile app to pair (E2EE).")
 		n := node.New(node.Config{
 			FS:    d.MemFS(),
 			Grace: time.Duration(cfg.GraceSeconds) * time.Second,
