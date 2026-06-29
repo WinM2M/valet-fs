@@ -8,18 +8,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anomalyco/valet-fs/internal/e2ee"
 	"github.com/anomalyco/valet-fs/internal/rpc"
+	"github.com/anomalyco/valet-fs/internal/transport"
 	"github.com/anomalyco/valet-fs/internal/transport/ws"
 	"github.com/anomalyco/valet-fs/internal/vault"
 )
 
 // vaultWSDial claims and connects to a session over the WebSocket hub (Durable
-// Object), returning a ready rpc.Client.
-func vaultWSDial(signaling, sid string) (*ws.Conn, *rpc.Client, error) {
-	conn, err := ws.DialController(signaling, sid)
+// Object), returning a ready rpc.Client. If the daemon published an E2EE public
+// key, the connection is end-to-end encrypted (the hub sees only ciphertext).
+func vaultWSDial(signaling, sid string) (transport.Conn, *rpc.Client, error) {
+	conn, daemonPub, err := ws.DialController(signaling, sid)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ws connect: %w", err)
 	}
+	if daemonPub != "" {
+		kp, err := e2ee.Generate()
+		if err != nil {
+			_ = conn.Close()
+			return nil, nil, fmt.Errorf("e2ee keygen: %w", err)
+		}
+		ec, err := e2ee.WrapController(conn, kp, daemonPub)
+		if err != nil {
+			_ = conn.Close()
+			return nil, nil, fmt.Errorf("e2ee handshake: %w", err)
+		}
+		cl := rpc.NewClient(ec)
+		ec.Start()
+		return ec, cl, nil
+	}
+	// Legacy / no-E2EE daemon: plaintext over the hub.
 	cl := rpc.NewClient(conn)
 	conn.Start()
 	return conn, cl, nil

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anomalyco/valet-fs/internal/e2ee"
 	"github.com/anomalyco/valet-fs/internal/hub"
 	"github.com/anomalyco/valet-fs/internal/node"
 	"github.com/anomalyco/valet-fs/internal/rpc"
@@ -41,7 +42,7 @@ func startDaemon(t *testing.T, hubURL string, grace time.Duration) *daemonHarnes
 		h.fs.Wipe()
 	}
 	n := node.New(node.Config{FS: h.fs, Grace: grace, Lock: lock, Mounted: h.isMounted})
-	conn, sid, err := ws.DialDaemon(hubURL)
+	conn, sid, err := ws.DialDaemon(hubURL, "")
 	if err != nil {
 		t.Fatalf("daemon dial: %v", err)
 	}
@@ -54,7 +55,7 @@ func startDaemon(t *testing.T, hubURL string, grace time.Duration) *daemonHarnes
 
 func connectVault(t *testing.T, hubURL, sid string) (*ws.Conn, *rpc.Client) {
 	t.Helper()
-	conn, err := ws.DialController(hubURL, sid)
+	conn, _, err := ws.DialController(hubURL, sid)
 	if err != nil {
 		t.Fatalf("vault dial: %v", err)
 	}
@@ -276,6 +277,76 @@ func TestExplicitUnmount(t *testing.T) {
 	}
 	if d.fs.Used() != 0 {
 		t.Fatalf("expected wiped FS, used=%d", d.fs.Used())
+	}
+}
+
+// E2EE: full encrypted round trip over the hub (the hub sees only ciphertext).
+func TestE2EEEncryptedRoundTrip(t *testing.T) {
+	hubURL := newHub(t)
+
+	// Daemon side with E2EE.
+	dkp, err := e2ee.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &daemonHarness{fs: vfs.New(0), mounted: true}
+	lock := func() {
+		h.mu.Lock()
+		h.mounted = false
+		h.mu.Unlock()
+		h.fs.Wipe()
+	}
+	n := node.New(node.Config{FS: h.fs, Grace: 5 * time.Second, Lock: lock, Mounted: h.isMounted})
+	rawD, sid, err := ws.DialDaemon(hubURL, dkp.PubB64())
+	if err != nil {
+		t.Fatalf("daemon dial: %v", err)
+	}
+	dConn := e2ee.WrapDaemon(rawD, dkp)
+	n.Attach(dConn)
+	dConn.Start()
+	t.Cleanup(func() { _ = dConn.Close() })
+
+	// Vault side with E2EE (daemon pub authenticated via claim/QR).
+	rawV, daemonPub, err := ws.DialController(hubURL, sid)
+	if err != nil {
+		t.Fatalf("vault dial: %v", err)
+	}
+	if daemonPub != dkp.PubB64() {
+		t.Fatalf("daemon pub mismatch: got %q", daemonPub)
+	}
+	vkp, _ := e2ee.Generate()
+	vConn, err := e2ee.WrapController(rawV, vkp, daemonPub)
+	if err != nil {
+		t.Fatalf("wrap controller: %v", err)
+	}
+	cl := rpc.NewClient(vConn)
+	vConn.Start()
+	defer vConn.Close()
+
+	// Encrypted WRITE, then verify the daemon decrypted it correctly.
+	ctx, cancel := callCtx()
+	_, err = cl.Call(ctx, rpc.MethodWrite, map[string]any{
+		"path":        "/keys/x",
+		"content_b64": base64.StdEncoding.EncodeToString([]byte("secret")),
+	})
+	cancel()
+	if err != nil {
+		t.Fatalf("encrypted WRITE: %v", err)
+	}
+	got, err := h.fs.Read("/keys/x")
+	if err != nil || string(got) != "secret" {
+		t.Fatalf("daemon decrypt mismatch: %q err=%v", got, err)
+	}
+
+	// Encrypted STATUS round trip.
+	ctx2, cancel2 := callCtx()
+	res, err := cl.Call(ctx2, rpc.MethodStatus, nil)
+	cancel2()
+	if err != nil {
+		t.Fatalf("encrypted STATUS: %v", err)
+	}
+	if mounted, _ := res.Result["mounted"].(bool); !mounted {
+		t.Fatal("expected mounted via encrypted status")
 	}
 }
 
