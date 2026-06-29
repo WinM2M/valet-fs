@@ -90,6 +90,11 @@ curl -X POST http://127.0.0.1:8080/sync
 ./valetfs serve
 ```
 
+The default transport is **`ws`** (WebSocket session hub / Cloudflare Durable
+Object) with end-to-end encryption: `serve` prints a pairing QR encoding
+`{v,sid,signaling,pub}`, and the hub/DO only ever relays ciphertext. Use
+`--transport webrtc` (or `VALETFS_TRANSPORT=webrtc`) for the legacy P2P path.
+
 If `--signaling` is omitted, default signaling URL is:
 
 `https://valetfs-signaling.winm2m.workers.dev`
