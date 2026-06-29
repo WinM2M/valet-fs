@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/joho/godotenv"
 )
@@ -48,6 +49,14 @@ type Config struct {
 
 	// RecordRuntimeState controls whether runtime.json is updated.
 	RecordRuntimeState bool
+
+	// Transport selects the control-plane transport: "webrtc" (legacy P2P) or
+	// "ws" (WebSocket session hub / Durable Object).
+	Transport string
+
+	// GraceSeconds is how long the VFS stays mounted after the vault peer goes
+	// offline before auto-locking (ws transport). 0 = lock immediately.
+	GraceSeconds int
 }
 
 // Load parses CLI flags and merges environment variables (.env supported).
@@ -67,6 +76,9 @@ func Load(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.WebdavDisabled, "webdav-disabled", defaultEnvBool("VALETFS_WEBDAV_DISABLED", false), "Disable WebDAV server")
 	fs.StringVar(&cfg.SignalingURL, "signaling", defaultEnv("VALETFS_SIGNALING", "https://valetfs-signaling.winm2m.workers.dev"), "Cloudflare Worker signaling URL")
 	fs.StringVar(&cfg.GitTempDir, "git-dir", defaultEnv("VALETFS_GIT_DIR", defaultGitDir()), "Ephemeral go-git diff directory")
+
+	fs.StringVar(&cfg.Transport, "transport", defaultEnv("VALETFS_TRANSPORT", "webrtc"), "Control-plane transport: webrtc|ws")
+	fs.IntVar(&cfg.GraceSeconds, "grace", defaultEnvInt("VALETFS_GRACE", 300), "Seconds to keep VFS mounted after vault goes offline (ws transport; 0 = immediate)")
 
 	var quotaMB int64
 	fs.Int64Var(&quotaMB, "quota-mb", 5, "Cluster quota in megabytes")
@@ -95,6 +107,18 @@ func defaultEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func defaultEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 func defaultEnvBool(key string, fallback bool) bool {

@@ -631,22 +631,44 @@ func (p *Peer) startCandidateExchange(signalingURL, sessionID, token, role strin
 
 	go func() {
 		since := 0
+		deadline := time.Now().Add(2 * time.Minute)
+		backoff := 500 * time.Millisecond
 		for {
-			if p.pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
+			if time.Now().After(deadline) {
+				vlogf("candidate exchange stopped role=%s reason=deadline", role)
+				return
+			}
+			state := p.pc.ConnectionState()
+			if state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateDisconnected {
+				vlogf("candidate exchange stopped role=%s reason=peer-state state=%s", role, state.String())
 				return
 			}
 			req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/sessions/%s/candidates?since=%d", signalingURL, sessionID, since), nil)
 			req.Header.Set("X-Valet-Role-Token", token)
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
-				time.Sleep(400 * time.Millisecond)
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > 15*time.Second {
+					backoff = 15 * time.Second
+				}
 				continue
 			}
 			if resp.StatusCode >= 300 {
+				status := resp.StatusCode
 				resp.Body.Close()
-				time.Sleep(500 * time.Millisecond)
+				if status == http.StatusForbidden || status == http.StatusNotFound {
+					vlogf("candidate exchange stopped role=%s reason=http-status status=%d", role, status)
+					return
+				}
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > 15*time.Second {
+					backoff = 15 * time.Second
+				}
 				continue
 			}
+			backoff = 500 * time.Millisecond
 			var out struct {
 				Candidates []webrtc.ICECandidateInit `json:"candidates"`
 				Next       int                       `json:"next"`

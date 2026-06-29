@@ -15,6 +15,8 @@
 
 export interface Env {
   VALETFS_KV: KVNamespace;
+  // Durable Object namespace backing the WebSocket control-plane hub.
+  SESSION_HUB: DurableObjectNamespace;
   // Legacy HMAC-secret mode (coturn-style auth-secret). Kept for self-hosted
   // deployments. Ignored when METERED_API_KEY is present.
   TURN_DOMAIN?: string;
@@ -30,6 +32,23 @@ export interface Env {
 }
 
 const TTL_SECONDS = 300; // 5 minutes
+
+async function shortIPHash(ip: string): Promise<string> {
+  const raw = (ip || "").trim();
+  if (!raw) return "unknown";
+  const enc = new TextEncoder().encode(raw);
+  const dig = await crypto.subtle.digest("SHA-256", enc);
+  const b = new Uint8Array(dig);
+  return Array.from(b.slice(0, 6), (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+async function audit(req: Request, event: string, sessionID = "-"): Promise<void> {
+  const ip = req.headers.get("CF-Connecting-IP") || "";
+  const ua = req.headers.get("User-Agent") || "";
+  const iph = await shortIPHash(ip);
+  const uash = await shortIPHash(ua);
+  console.log(`audit event=${event} sid=${sessionID} iph=${iph} uah=${uash}`);
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -161,7 +180,46 @@ export default {
       });
     }
 
+    // --- WebSocket / Durable Object control plane (/ws/...) ---
+    // Kept under a distinct prefix so it never collides with the legacy WebRTC
+    // signaling endpoints below. The DO only relays opaque frames + presence;
+    // it never observes token material (E2EE is a peer-to-peer concern).
+    if (parts[0] === "ws") {
+      // POST /ws/sessions  {role:"daemon"} -> {session_id, daemon_token}
+      if (req.method === "POST" && parts.length === 2 && parts[1] === "sessions") {
+        await audit(req, "ws.sessions.create");
+        const body = (await req.json().catch(() => ({}))) as { role?: string };
+        if (body.role !== "daemon") return json({ error: "role must be daemon" }, 400);
+        const sid = randomID();
+        const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
+        const r = await stub.fetch("https://do/?do=create", { method: "POST" });
+        const { daemon_token } = (await r.json()) as { daemon_token: string };
+        return json({ session_id: sid, daemon_token });
+      }
+      // POST /ws/sessions/:id/claim -> {controller_token}
+      if (req.method === "POST" && parts.length === 4 && parts[1] === "sessions" && parts[3] === "claim") {
+        const sid = parts[2];
+        await audit(req, "ws.sessions.claim", sid);
+        const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
+        const r = await stub.fetch("https://do/?do=claim", { method: "POST" });
+        return new Response(r.body, { status: r.status, headers: { "content-type": "application/json" } });
+      }
+      // GET /ws/connect?sid=&role=&token=  -> websocket upgrade (routed to DO)
+      if (parts[1] === "connect") {
+        const sid = url.searchParams.get("sid") || "";
+        if (!sid) return new Response("missing sid", { status: 400 });
+        const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
+        const fwd = new URL("https://do/");
+        fwd.searchParams.set("do", "connect");
+        fwd.searchParams.set("role", url.searchParams.get("role") || "");
+        fwd.searchParams.set("token", url.searchParams.get("token") || "");
+        return stub.fetch(new Request(fwd.toString(), req));
+      }
+      return new Response("not found", { status: 404 });
+    }
+
     if (req.method === "POST" && parts.length === 1 && parts[0] === "sessions") {
+      await audit(req, "sessions.create");
       const body = (await req.json().catch(() => ({}))) as { offer?: unknown; role?: string; init?: boolean };
       const { offer, role, init } = body;
       if (role !== "daemon") return json({ error: "role must be daemon" }, 400);
@@ -188,6 +246,7 @@ export default {
 
     if (req.method === "POST" && parts[0] === "sessions" && parts.length === 3 && parts[2] === "claim") {
       const id = parts[1];
+      await audit(req, "sessions.claim", id);
       const offerRaw = await env.VALETFS_KV.get(`offer:${id}`);
       if (!offerRaw) return new Response("not found", { status: 404 });
       const claimed = await env.VALETFS_KV.get(`tok:controller:${id}`);
@@ -201,6 +260,9 @@ export default {
 
     if (parts[0] === "sessions" && parts.length === 3 && parts[2] !== "candidates") {
       const [, id, kind] = parts;
+      if (kind === "turn" || kind === "answer" || kind === "offer") {
+        await audit(req, `sessions.${kind}.${req.method.toLowerCase()}`, id);
+      }
       if (kind === "turn" && req.method === "GET") {
         const dTok = await getToken(env, id, "daemon");
         const cTok = await getToken(env, id, "controller");
@@ -246,6 +308,9 @@ export default {
 
     if (parts[0] === "sessions" && parts.length === 3 && parts[2] === "candidates") {
       const id = parts[1];
+      if (req.method === "GET" || req.method === "POST") {
+        await audit(req, `sessions.candidates.${req.method.toLowerCase()}`, id);
+      }
       const daemonToken = await getToken(env, id, "daemon");
       const ctrlToken = await getToken(env, id, "controller");
       const header = req.headers.get("X-Valet-Role-Token") || "";
@@ -288,7 +353,7 @@ export default {
             const next = all[all.length - 1].seq;
             return json({ candidates: filtered.map((e) => e.candidate), next });
           }
-          await new Promise((resolve) => setTimeout(resolve, 250));
+          await new Promise((resolve) => setTimeout(resolve, 3000));
         }
         return json({ candidates: [], next: since });
       }
@@ -314,3 +379,112 @@ export default {
     });
   },
 };
+
+// SessionHub is the Durable Object that hosts one logical session. Both the
+// daemon and the vault connect OUTBOUND via WebSocket; the DO relays opaque
+// frames between them and emits presence frames so the daemon can drive its
+// grace timer. It uses the WebSocket Hibernation API so idle sessions incur no
+// duration charges (see control-plane-do-ws-design.md §6).
+function presence(sys: string, role: string): string {
+  return JSON.stringify({ sys, role });
+}
+
+function otherRole(role: string): string {
+  return role === "daemon" ? "vault" : "daemon";
+}
+
+export class SessionHub {
+  state: DurableObjectState;
+
+  constructor(state: DurableObjectState) {
+    this.state = state;
+  }
+
+  async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    const action = url.searchParams.get("do");
+
+    if (action === "create") {
+      const token = randomToken();
+      await this.state.storage.put("daemon_token", token);
+      return new Response(JSON.stringify({ daemon_token: token }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (action === "claim") {
+      let token = (await this.state.storage.get<string>("vault_token")) || "";
+      if (!token) {
+        token = randomToken();
+        await this.state.storage.put("vault_token", token);
+      }
+      return new Response(JSON.stringify({ controller_token: token }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (action === "connect") {
+      const role = url.searchParams.get("role") || "";
+      const token = url.searchParams.get("token") || "";
+      if (role !== "daemon" && role !== "vault") {
+        return new Response("bad role", { status: 400 });
+      }
+      const want = await this.state.storage.get<string>(
+        role === "daemon" ? "daemon_token" : "vault_token",
+      );
+      if (!want || token !== want) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      // Hibernatable accept, tagged by role so we can find the peer later.
+      this.state.acceptWebSocket(server, [role]);
+      // Presence: tell the existing peer we are online, and learn about it.
+      const peers = this.state.getWebSockets(otherRole(role));
+      for (const p of peers) {
+        try {
+          p.send(presence("peer_online", role));
+          server.send(presence("peer_online", otherRole(role)));
+        } catch {
+          // ignore broken peer
+        }
+      }
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    return new Response("not found", { status: 404 });
+  }
+
+  // Relay every frame to the other role verbatim.
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const tags = this.state.getTags(ws);
+    const role = tags[0] || "";
+    for (const p of this.state.getWebSockets(otherRole(role))) {
+      try {
+        p.send(message);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  async webSocketClose(ws: WebSocket): Promise<void> {
+    this.notifyOffline(ws);
+  }
+
+  async webSocketError(ws: WebSocket): Promise<void> {
+    this.notifyOffline(ws);
+  }
+
+  private notifyOffline(ws: WebSocket): void {
+    const role = this.state.getTags(ws)[0] || "";
+    for (const p of this.state.getWebSockets(otherRole(role))) {
+      try {
+        p.send(presence("peer_offline", role));
+      } catch {
+        // ignore
+      }
+    }
+  }
+}

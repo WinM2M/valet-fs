@@ -28,6 +28,8 @@ import (
 
 	"github.com/anomalyco/valet-fs/internal/config"
 	"github.com/anomalyco/valet-fs/internal/daemon"
+	"github.com/anomalyco/valet-fs/internal/node"
+	"github.com/anomalyco/valet-fs/internal/transport/ws"
 	"github.com/anomalyco/valet-fs/internal/vfs"
 	"github.com/anomalyco/valet-fs/internal/webrtc"
 )
@@ -38,7 +40,7 @@ type runtimeState struct {
 }
 
 var cliVerbose bool
-const cliVersion = "0.1.2"
+const cliVersion = "0.1.3"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -51,6 +53,12 @@ func main() {
 		switch os.Args[1] {
 		case "serve":
 			serve(os.Args[2:])
+			return
+		case "hub":
+			if err := runHub(os.Args[2:]); err != nil {
+				_, _ = fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
 			return
 		case "vault":
 			if err := runVault(os.Args[2:]); err != nil {
@@ -112,6 +120,27 @@ func serve(args []string) {
 
 	if cfg.Dev {
 		log.Println("valetd: starting in DEV mode (no WebRTC)")
+	} else if cfg.Transport == "ws" {
+		log.Println("valetd: starting in PRODUCTION mode (ws transport)")
+		conn, sid, err := ws.DialDaemon(cfg.SignalingURL)
+		if err != nil {
+			log.Fatalf("valetd: ws dial: %v", err)
+		}
+		fmt.Printf("Session ID: %s\n", sid)
+		n := node.New(node.Config{
+			FS:    d.MemFS(),
+			Grace: time.Duration(cfg.GraceSeconds) * time.Second,
+			Lock: func() {
+				log.Println("valetd: auto-lock (grace expired / remote lock); unmounting + wiping")
+				_ = d.Unmount()
+				d.MemFS().Wipe()
+			},
+			Mounted: d.Mounted,
+		})
+		n.Attach(conn)
+		conn.OnClose(func() { log.Println("valetd: ws connection closed") })
+		conn.Start()
+		defer conn.Close()
 	} else {
 		log.Println("valetd: starting in PRODUCTION mode")
 		peer, err := webrtc.New()
