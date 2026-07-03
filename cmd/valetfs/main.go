@@ -132,7 +132,7 @@ func serve(args []string) {
 		if err != nil {
 			log.Fatalf("valetd: ws dial: %v", err)
 		}
-		conn := e2ee.WrapDaemon(rawConn, kp)
+		daemonToken := rawConn.Token()
 		// QR payload carries the E2EE public key (authenticated out-of-band by
 		// the scan), the session id, and the signaling URL.
 		qrPayload, _ := json.Marshal(map[string]any{
@@ -151,10 +151,43 @@ func serve(args []string) {
 			},
 			Mounted: d.Mounted,
 		})
-		n.Attach(conn)
-		conn.OnClose(func() { log.Println("valetd: ws connection closed") })
-		conn.Start()
-		defer conn.Close()
+
+		// attach wires a raw ws conn through E2EE into the node, and installs a
+		// reconnect-or-self-lock handler for when the control-plane link drops.
+		var attach func(raw *ws.Conn)
+		reconnect := func() {
+			// The control plane dropped. Try to re-join the SAME session. If the
+			// session is gone (e.g. the vault "forgot" it -> DO deleted), every
+			// attempt fails; after the window we self-lock: losing the control
+			// plane must not leave secrets mounted (deny-by-default).
+			deadline := time.Now().Add(30 * time.Second)
+			backoff := time.Second
+			for time.Now().Before(deadline) {
+				time.Sleep(backoff)
+				raw, err := ws.ReconnectDaemon(cfg.SignalingURL, sid, daemonToken)
+				if err == nil {
+					log.Println("valetd: reconnected to control plane")
+					attach(raw)
+					return
+				}
+				if backoff < 8*time.Second {
+					backoff *= 2
+				}
+			}
+			log.Println("valetd: control plane lost (session gone); self-locking (unmount + wipe)")
+			_ = d.Unmount()
+			d.MemFS().Wipe()
+		}
+		attach = func(raw *ws.Conn) {
+			ec := e2ee.WrapDaemon(raw, kp)
+			n.Attach(ec)
+			ec.OnClose(func() {
+				log.Println("valetd: ws connection closed; attempting reconnect")
+				go reconnect()
+			})
+			ec.Start()
+		}
+		attach(rawConn)
 	} else {
 		log.Println("valetd: starting in PRODUCTION mode")
 		peer, err := webrtc.New()

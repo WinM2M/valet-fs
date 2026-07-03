@@ -218,6 +218,14 @@ export default {
         fwd.searchParams.set("token", url.searchParams.get("token") || "");
         return stub.fetch(new Request(fwd.toString(), req));
       }
+      // DELETE /ws/sessions/:id  -> tear down the session (frees DO storage +
+      // closes any open sockets). Used by the app's "Forget daemon".
+      if (req.method === "DELETE" && parts.length === 3 && parts[1] === "sessions") {
+        const sid = parts[2];
+        await audit(req, "ws.sessions.delete", sid);
+        const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
+        return stub.fetch("https://do/?do=delete", { method: "POST" });
+      }
       return new Response("not found", { status: 404 });
     }
 
@@ -421,6 +429,20 @@ export class SessionHub {
       return new Response(JSON.stringify({ daemon_token: token }), {
         headers: { "content-type": "application/json" },
       });
+    }
+
+    if (action === "delete") {
+      // Close any live sockets and wipe all session storage, releasing the
+      // Durable Object's resources.
+      for (const ws of this.state.getWebSockets()) {
+        try {
+          ws.close(1000, "session deleted");
+        } catch {
+          // ignore
+        }
+      }
+      await this.state.storage.deleteAll();
+      return new Response(null, { status: 204 });
     }
 
     if (action === "claim") {
