@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -43,6 +44,33 @@ type runtimeState struct {
 
 var cliVerbose bool
 const cliVersion = "0.1.5"
+
+// joinKey is the app-provisioned connection key decoded by `serve --join`.
+type joinKey struct {
+	V         int    `json:"v"`
+	SID       string `json:"sid"`
+	Token     string `json:"token"`
+	Signaling string `json:"signaling"`
+}
+
+// decodeJoinKey parses a base64url (or std base64) JSON connection key.
+func decodeJoinKey(s string) (*joinKey, error) {
+	s = strings.TrimSpace(s)
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		if raw, err = base64.StdEncoding.DecodeString(s); err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+	}
+	var k joinKey
+	if err := json.Unmarshal(raw, &k); err != nil {
+		return nil, err
+	}
+	if k.SID == "" || k.Token == "" {
+		return nil, fmt.Errorf("missing sid or token")
+	}
+	return &k, nil
+}
 
 func main() {
 	if len(os.Args) > 1 {
@@ -128,19 +156,45 @@ func serve(args []string) {
 		if err != nil {
 			log.Fatalf("valetd: e2ee keygen: %v", err)
 		}
-		rawConn, sid, err := ws.DialDaemon(cfg.SignalingURL, kp.PubB64())
-		if err != nil {
-			log.Fatalf("valetd: ws dial: %v", err)
+		var rawConn *ws.Conn
+		var sid, daemonToken, signaling string
+		if cfg.JoinKey != "" {
+			// Reverse flow: the app pre-created the session; join it as the daemon.
+			key, err := decodeJoinKey(cfg.JoinKey)
+			if err != nil {
+				log.Fatalf("valetd: invalid --join key: %v", err)
+			}
+			sid, daemonToken = key.SID, key.Token
+			signaling = key.Signaling
+			if signaling == "" {
+				signaling = cfg.SignalingURL
+			}
+			if err := ws.PublishPub(signaling, sid, daemonToken, kp.PubB64()); err != nil {
+				log.Fatalf("valetd: publish pubkey: %v", err)
+			}
+			rawConn, err = ws.JoinDaemon(signaling, sid, daemonToken)
+			if err != nil {
+				log.Fatalf("valetd: join session: %v", err)
+			}
+			fmt.Printf("Joined session: %s\n", sid)
+			fmt.Println("The ValetFS app can now push secrets and control this daemon (E2EE).")
+		} else {
+			signaling = cfg.SignalingURL
+			var err error
+			rawConn, sid, err = ws.DialDaemon(signaling, kp.PubB64())
+			if err != nil {
+				log.Fatalf("valetd: ws dial: %v", err)
+			}
+			daemonToken = rawConn.Token()
+			// QR payload carries the E2EE public key (authenticated out-of-band by
+			// the scan), the session id, and the signaling URL.
+			qrPayload, _ := json.Marshal(map[string]any{
+				"v": 1, "sid": sid, "signaling": signaling, "pub": kp.PubB64(),
+			})
+			qrterminal.GenerateHalfBlock(string(qrPayload), qrterminal.L, os.Stdout)
+			fmt.Printf("Session ID: %s\n", sid)
+			fmt.Println("Scan with the ValetFS mobile app to pair (E2EE).")
 		}
-		daemonToken := rawConn.Token()
-		// QR payload carries the E2EE public key (authenticated out-of-band by
-		// the scan), the session id, and the signaling URL.
-		qrPayload, _ := json.Marshal(map[string]any{
-			"v": 1, "sid": sid, "signaling": cfg.SignalingURL, "pub": kp.PubB64(),
-		})
-		qrterminal.GenerateHalfBlock(string(qrPayload), qrterminal.L, os.Stdout)
-		fmt.Printf("Session ID: %s\n", sid)
-		fmt.Println("Scan with the ValetFS mobile app to pair (E2EE).")
 		n := node.New(node.Config{
 			FS:    d.MemFS(),
 			Grace: time.Duration(cfg.GraceSeconds) * time.Second,
@@ -164,7 +218,7 @@ func serve(args []string) {
 			backoff := time.Second
 			for time.Now().Before(deadline) {
 				time.Sleep(backoff)
-				raw, err := ws.ReconnectDaemon(cfg.SignalingURL, sid, daemonToken)
+				raw, err := ws.ReconnectDaemon(signaling, sid, daemonToken)
 				if err == nil {
 					log.Println("valetd: reconnected to control plane")
 					attach(raw)

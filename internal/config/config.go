@@ -57,6 +57,10 @@ type Config struct {
 	// GraceSeconds is how long the VFS stays mounted after the vault peer goes
 	// offline before auto-locking (ws transport). 0 = lock immediately.
 	GraceSeconds int
+
+	// JoinKey, when set, joins an app-provisioned session (reverse flow) as the
+	// daemon instead of creating a new session. Implies ws transport.
+	JoinKey string
 }
 
 // Load parses CLI flags and merges environment variables (.env supported).
@@ -78,6 +82,7 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&cfg.GitTempDir, "git-dir", defaultEnv("VALETFS_GIT_DIR", defaultGitDir()), "Ephemeral go-git diff directory")
 
 	fs.StringVar(&cfg.Transport, "transport", defaultEnv("VALETFS_TRANSPORT", "ws"), "Control-plane transport: ws (default)|webrtc")
+	fs.StringVar(&cfg.JoinKey, "join", defaultEnv("VALETFS_JOIN", ""), "Join an app-provisioned session with a connection key (reverse flow)")
 	fs.IntVar(&cfg.GraceSeconds, "grace", defaultEnvInt("VALETFS_GRACE", 300), "Seconds to keep VFS mounted after vault goes offline (ws transport; 0 = immediate)")
 
 	var quotaMB int64
@@ -87,6 +92,9 @@ func Load(args []string) (*Config, error) {
 		return nil, err
 	}
 	cfg.QuotaBytes = quotaMB * 1024 * 1024
+	if cfg.JoinKey != "" {
+		cfg.Transport = "ws" // reverse-join is a ws-only flow
+	}
 
 	if cfg.MountPoint == "" {
 		return nil, fmt.Errorf("mount point must not be empty")

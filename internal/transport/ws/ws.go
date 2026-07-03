@@ -155,6 +155,38 @@ func ReconnectDaemon(hubURL, sessionID, token string) (*Conn, error) {
 	return c, nil
 }
 
+// JoinDaemon connects to an EXISTING, app-provisioned session as the daemon
+// (reverse flow). Same wire path as ReconnectDaemon; named for clarity.
+func JoinDaemon(hubURL, sessionID, token string) (*Conn, error) {
+	return ReconnectDaemon(hubURL, sessionID, token)
+}
+
+// PublishPub uploads the daemon's X25519 public key to an existing session,
+// authenticated by the daemon token. Used by the reverse (join) flow, where the
+// pub was not set at create time.
+func PublishPub(hubURL, sessionID, token, pubB64 string) error {
+	body, _ := json.Marshal(map[string]any{"pub": pubB64})
+	req, err := http.NewRequest(
+		http.MethodPost,
+		fmt.Sprintf("%s/ws/sessions/%s/pub", hubURL, sessionID),
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Valet-Role-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("publish pub: %s", resp.Status)
+	}
+	return nil
+}
+
 // DialController claims an existing session and connects as the vault role.
 // It also returns the daemon's published X25519 public key (base64; may be
 // empty if the daemon did not enable E2EE).
