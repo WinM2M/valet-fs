@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/websocket"
 )
@@ -21,11 +22,13 @@ import (
 type Conn struct {
 	ws *websocket.Conn
 
-	mu      sync.Mutex
-	onData  func([]byte)
-	onOpen  func()
-	onClose func()
-	started bool
+	mu        sync.Mutex
+	onData    func([]byte)
+	onOpen    func()
+	onClose   func()
+	started   bool
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // OnData registers the inbound-frame callback.
@@ -41,7 +44,33 @@ func (c *Conn) OnClose(f func()) { c.mu.Lock(); c.onClose = f; c.mu.Unlock() }
 func (c *Conn) Send(b []byte) error { return websocket.Message.Send(c.ws, b) }
 
 // Close tears the socket down.
-func (c *Conn) Close() error { return c.ws.Close() }
+func (c *Conn) Close() error { c.stop(); return c.ws.Close() }
+
+// stop signals background goroutines (keepalive) to exit, once.
+func (c *Conn) stop() {
+	c.closeOnce.Do(func() {
+		if c.done != nil {
+			close(c.done)
+		}
+	})
+}
+
+// keepalive sends a tiny frame periodically so an idle daemon<->hub WebSocket
+// is not closed by the edge (Cloudflare) as inactive. The peer ignores it.
+func (c *Conn) keepalive() {
+	t := time.NewTicker(25 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-t.C:
+			if err := websocket.Message.Send(c.ws, []byte(`{"sys":"ka"}`)); err != nil {
+				return
+			}
+		}
+	}
+}
 
 // Start begins the read loop and fires OnOpen. Call after registering handlers.
 func (c *Conn) Start() {
@@ -57,12 +86,14 @@ func (c *Conn) Start() {
 		onOpen()
 	}
 	go c.readLoop()
+	go c.keepalive()
 }
 
 func (c *Conn) readLoop() {
 	for {
 		var data []byte
 		if err := websocket.Message.Receive(c.ws, &data); err != nil {
+			c.stop()
 			c.mu.Lock()
 			onClose := c.onClose
 			c.mu.Unlock()
@@ -128,7 +159,7 @@ func dialWS(hubURL, sid, role, token string) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Conn{ws: c}, nil
+	return &Conn{ws: c, done: make(chan struct{})}, nil
 }
 
 func toWSScheme(httpURL string) string {
