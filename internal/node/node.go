@@ -127,6 +127,11 @@ func (n *MemoryNode) cancelGrace() {
 	n.mu.Unlock()
 }
 
+// ArmGrace starts the grace countdown as if the vault were offline. The reverse
+// (join) flow uses this so a daemon that is never claimed does not stay mounted
+// forever; a vault coming online cancels it.
+func (n *MemoryNode) ArmGrace() { n.startGrace() }
+
 // SetGrace updates the grace duration at runtime.
 func (n *MemoryNode) SetGrace(d time.Duration) {
 	n.mu.Lock()

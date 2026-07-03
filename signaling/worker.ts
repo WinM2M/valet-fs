@@ -460,7 +460,15 @@ export class SessionHub {
       } catch {
         // no body
       }
-      if (pub) await this.state.storage.put("daemon_pub", pub);
+      if (pub) {
+        // First-writer-wins: the pubkey is immutable once set, so a party that
+        // later obtains the token cannot swap the E2EE key mid-session.
+        const existing = await this.state.storage.get<string>("daemon_pub");
+        if (existing && existing !== pub) {
+          return new Response("daemon_pub already set", { status: 409 });
+        }
+        await this.state.storage.put("daemon_pub", pub);
+      }
       return new Response(null, { status: 204 });
     }
 
