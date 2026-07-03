@@ -218,6 +218,14 @@ export default {
         fwd.searchParams.set("token", url.searchParams.get("token") || "");
         return stub.fetch(new Request(fwd.toString(), req));
       }
+      // GET /ws/sessions/:id/presence -> {daemon:bool, vault:bool, exists:bool}
+      // Read-only liveness probe for the app's daemon list. Does NOT open a
+      // socket, so it never touches the daemon's grace timer.
+      if (req.method === "GET" && parts.length === 4 && parts[1] === "sessions" && parts[3] === "presence") {
+        const sid = parts[2];
+        const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
+        return stub.fetch("https://do/?do=presence");
+      }
       // DELETE /ws/sessions/:id  -> tear down the session (frees DO storage +
       // closes any open sockets). Used by the app's "Forget daemon".
       if (req.method === "DELETE" && parts.length === 3 && parts[1] === "sessions") {
@@ -427,6 +435,17 @@ export class SessionHub {
       await this.state.storage.put("daemon_token", token);
       if (pub) await this.state.storage.put("daemon_pub", pub);
       return new Response(JSON.stringify({ daemon_token: token }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (action === "presence") {
+      // getWebSockets is hibernation-aware: it reports connected sockets even
+      // if the DO was evicted from memory. exists reflects a live pairing.
+      const daemon = this.state.getWebSockets("daemon").length > 0;
+      const vault = this.state.getWebSockets("vault").length > 0;
+      const exists = !!(await this.state.storage.get<string>("daemon_token"));
+      return new Response(JSON.stringify({ daemon, vault, exists }), {
         headers: { "content-type": "application/json" },
       });
     }
