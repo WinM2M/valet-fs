@@ -22,6 +22,9 @@ import (
 type Conn struct {
 	ws *websocket.Conn
 
+	sid   string // session id (daemon role, for reconnect)
+	token string // daemon role token (for reconnect)
+
 	mu        sync.Mutex
 	onData    func([]byte)
 	onOpen    func()
@@ -130,7 +133,26 @@ func DialDaemon(hubURL, daemonPubB64 string) (*Conn, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	c.sid, c.token = resp.SessionID, resp.DaemonToken
 	return c, resp.SessionID, nil
+}
+
+// SessionID returns the daemon session id (set for DialDaemon connections).
+func (c *Conn) SessionID() string { return c.sid }
+
+// Token returns the daemon role token (set for DialDaemon connections).
+func (c *Conn) Token() string { return c.token }
+
+// ReconnectDaemon re-opens a daemon WebSocket to an EXISTING session without
+// allocating a new one. It fails if the session no longer exists on the hub
+// (e.g. the vault deleted it), which the caller uses to trigger a self-lock.
+func ReconnectDaemon(hubURL, sessionID, token string) (*Conn, error) {
+	c, err := dialWS(hubURL, sessionID, "daemon", token)
+	if err != nil {
+		return nil, err
+	}
+	c.sid, c.token = sessionID, token
+	return c, nil
 }
 
 // DialController claims an existing session and connects as the vault role.
