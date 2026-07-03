@@ -226,6 +226,16 @@ export default {
         const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
         return stub.fetch("https://do/?do=presence");
       }
+      // POST /ws/sessions/:id/pub  {pub}   header X-Valet-Role-Token: daemon_token
+      // A daemon that JOINS an app-provisioned session publishes its E2EE public
+      // key here (the forward flow publishes it at create time instead).
+      if (req.method === "POST" && parts.length === 4 && parts[1] === "sessions" && parts[3] === "pub") {
+        const sid = parts[2];
+        const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
+        const fwd = new URL("https://do/");
+        fwd.searchParams.set("do", "setpub");
+        return stub.fetch(new Request(fwd.toString(), req));
+      }
       // DELETE /ws/sessions/:id  -> tear down the session (frees DO storage +
       // closes any open sockets). Used by the app's "Forget daemon".
       if (req.method === "DELETE" && parts.length === 3 && parts[1] === "sessions") {
@@ -437,6 +447,21 @@ export class SessionHub {
       return new Response(JSON.stringify({ daemon_token: token }), {
         headers: { "content-type": "application/json" },
       });
+    }
+
+    if (action === "setpub") {
+      const token = await this.state.storage.get<string>("daemon_token");
+      const hdr = req.headers.get("X-Valet-Role-Token") || "";
+      if (!token || hdr !== token) return new Response("forbidden", { status: 403 });
+      let pub = "";
+      try {
+        const b = (await req.json()) as { pub?: string };
+        pub = b.pub || "";
+      } catch {
+        // no body
+      }
+      if (pub) await this.state.storage.put("daemon_pub", pub);
+      return new Response(null, { status: 204 });
     }
 
     if (action === "presence") {
