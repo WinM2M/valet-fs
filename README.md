@@ -7,6 +7,53 @@ allows it.
 This repository contains the Go implementation of the desktop daemon plus
 a Cloudflare Worker signaling stub.
 
+## AI agent quickstart — join a session from the ValetFS app
+
+If a user asks you (an AI agent / coding assistant) to connect to their ValetFS
+session, they will have tapped **"Provision an agent"** in the ValetFS mobile
+app and given you a **connection key** (a long base64url string). To receive
+their secrets into an in-memory vault on this machine, do exactly two steps:
+
+**1. Install the `valetfs` CLI** (Linux x86_64 / arm64):
+
+```sh
+curl -fsSL https://winm2m.github.io/valet-fs/install.sh | bash
+```
+
+No root, drivers, or FUSE are required — if FUSE is unavailable the daemon
+serves files over a loopback WebDAV endpoint and the local CLI instead. To
+install without sudo: `... | INSTALL_DIR=$HOME/.local/bin bash` (and ensure that
+dir is on `PATH`). On macOS/Windows or unsupported arches, build from source:
+`git clone https://github.com/winm2m/valet-fs && cd valet-fs/valet-fs && go build -o valetfs ./cmd/valetfs`.
+
+**2. Join the session** with the key the user gave you:
+
+```sh
+valetfs serve --join <CONNECTION_KEY>
+```
+
+This connects to the app-provisioned session as the daemon, publishes an E2EE
+public key, and starts an **in-memory** file system. Leave it running (e.g. in a
+background process). Once the user pushes secrets from the app, read them with
+the local CLI (separate terminal / process):
+
+```sh
+valetfs ls /keys              # list what the app pushed
+valetfs cat /keys/github      # read one secret
+valetfs status                # mount state + bytes used
+```
+
+Notes for agents:
+
+- The key is a **secret** (a bearer capability for this session) — do not log it,
+  echo it into shared transcripts, or commit it.
+- Secrets live only in the daemon's heap. On `Ctrl-C`, remote **Lock/Unmount**,
+  or if the app **forgets** the session, the daemon unmounts and zero-wipes
+  memory; if it sits unclaimed it auto-locks after the grace window.
+- The connection key already contains the signaling URL, so `--signaling` is not
+  needed. If the daemon prints `Joined session: <id>`, you are connected and can
+  wait for the app to push.
+
 ## Layout
 
 ```
