@@ -242,6 +242,11 @@ func serve(args []string) {
 			ec.Start()
 		}
 		attach(rawConn)
+		if cfg.JoinKey != "" {
+			// Reverse flow: no vault has connected yet. Arm the grace timer so an
+			// unclaimed daemon auto-locks; a vault coming online cancels it.
+			n.ArmGrace()
+		}
 	} else {
 		log.Println("valetd: starting in PRODUCTION mode")
 		peer, err := webrtc.New()
