@@ -74,6 +74,36 @@ func (d *Daemon) Mounted() bool {
 // the canonical view of the cluster to paired mobile apps.
 func (d *Daemon) MemFS() *vfs.MemFS { return d.fs }
 
+// Backend reports the active mount frontend: "fuse", "webdav", or "none".
+func (d *Daemon) Backend() string { return d.mounter.Backend() }
+
+// FuseActive reports whether a real kernel FUSE mount is currently serving
+// (as opposed to the loopback WebDAV fallback used when /dev/fuse is absent).
+func (d *Daemon) FuseActive() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.mounted && d.fuseErr == "" && d.mounter.Backend() == "fuse"
+}
+
+// FuseError returns the last FUSE mount error, if any (empty when using the
+// WebDAV fallback, which is expected on hosts without /dev/fuse).
+func (d *Daemon) FuseError() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.fuseErr
+}
+
+// WebdavServing reports whether the loopback WebDAV server is currently up.
+func (d *Daemon) WebdavServing() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.webdavOn
+}
+
+// WebdavAddr returns the bound WebDAV loopback address (may be empty until the
+// listener binds; informational only).
+func (d *Daemon) WebdavAddr() string { return d.webdav.Addr() }
+
 // Mount idempotently brings the VFS online.
 func (d *Daemon) Mount() error {
 	d.mu.Lock()
@@ -131,6 +161,10 @@ func (d *Daemon) Unmount() error {
 		return nil
 	}
 	d.mounted = false
+	// Clear the serving-state flags so STATUS does not keep reporting a live
+	// WebDAV server / stale FUSE error after teardown (grace/self-lock path).
+	d.webdavOn = false
+	d.fuseErr = ""
 	d.mu.Unlock()
 	log.Printf("valetfs: unmounting %s", d.cfg.MountPoint)
 	if err := d.mounter.Unmount(); err != nil {
@@ -264,11 +298,18 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	fuseErr := d.fuseErr
 	webdavOn := d.webdavOn
 	d.mu.Unlock()
+	backend := d.mounter.Backend()
+	fuseActive := mounted && fuseErr == "" && backend == "fuse"
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mounted":    mounted,
 		"mountpoint": d.cfg.MountPoint,
+		"backend":    backend,
+		"serving":    fuseActive || webdavOn,
 		"fuse": map[string]any{
-			"mounted": mounted,
+			// active = a real kernel FUSE mount is serving. "mounted" is kept
+			// as a back-compat alias with the corrected (accurate) meaning.
+			"active":  fuseActive,
+			"mounted": fuseActive,
 			"error":   fuseErr,
 		},
 		"webdav": map[string]any{

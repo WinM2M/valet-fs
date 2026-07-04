@@ -46,3 +46,7 @@ func (w *windowsMounter) Unmount() error {
 	}
 	return w.inner.Unmount()
 }
+
+// Backend reports "webdav": the Windows frontend maps a drive letter via the
+// WebDAV redirector, so the underlying transport is loopback WebDAV.
+func (*windowsMounter) Backend() string { return "webdav" }

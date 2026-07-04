@@ -36,6 +36,20 @@ type Config struct {
 	Lock func()
 	// Mounted reports the current mount state for STATUS.
 	Mounted func() bool
+	// Serving, when set, augments STATUS with transport-backend detail so a
+	// client (the app) can distinguish "unmounted + wiped" (mounted=false)
+	// from "serving over WebDAV because the host has no FUSE" (mounted=true,
+	// backend=webdav). Optional for backward compatibility.
+	Serving func() ServeInfo
+}
+
+// ServeInfo describes which frontend is actually serving the VFS, for STATUS.
+type ServeInfo struct {
+	Backend       string // "fuse" | "webdav" | "none"
+	FuseActive    bool   // a real kernel FUSE mount is serving
+	FuseError     string // last FUSE mount error (empty when on WebDAV fallback)
+	WebdavServing bool   // loopback WebDAV server is up
+	WebdavAddr    string // bound WebDAV loopback address (informational)
 }
 
 // MemoryNode is the daemon-side control endpoint.
@@ -188,11 +202,19 @@ func (n *MemoryNode) register() {
 		if n.cfg.Mounted != nil {
 			mounted = n.cfg.Mounted()
 		}
-		return map[string]any{
+		res := map[string]any{
 			"mounted": mounted,
 			"used":    fs.Used(),
 			"version": fs.Version(),
-		}, nil
+		}
+		if n.cfg.Serving != nil {
+			s := n.cfg.Serving()
+			res["backend"] = s.Backend
+			res["serving"] = s.FuseActive || s.WebdavServing
+			res["fuse"] = map[string]any{"active": s.FuseActive, "error": s.FuseError}
+			res["webdav"] = map[string]any{"serving": s.WebdavServing, "addr": s.WebdavAddr}
+		}
+		return res, nil
 	})
 
 	n.disp.Handle(rpc.MethodManifest, func(req rpc.Message) (map[string]any, error) {

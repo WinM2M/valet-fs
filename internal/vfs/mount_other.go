@@ -15,3 +15,4 @@ func PreUnmount(_ string) {}
 
 func (*stubMounter) Mount(string) error { return errors.New("valetfs: platform not supported") }
 func (*stubMounter) Unmount() error     { return nil }
+func (*stubMounter) Backend() string    { return "none" }

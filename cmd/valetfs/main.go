@@ -204,6 +204,15 @@ func serve(args []string) {
 				d.MemFS().Wipe()
 			},
 			Mounted: d.Mounted,
+			Serving: func() node.ServeInfo {
+				return node.ServeInfo{
+					Backend:       d.Backend(),
+					FuseActive:    d.FuseActive(),
+					FuseError:     d.FuseError(),
+					WebdavServing: d.WebdavServing(),
+					WebdavAddr:    d.WebdavAddr(),
+				}
+			},
 		})
 
 		// attach wires a raw ws conn through E2EE into the node, and installs a
