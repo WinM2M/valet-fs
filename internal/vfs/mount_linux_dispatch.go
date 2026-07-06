@@ -126,3 +126,5 @@ func (f *fallbackMounter) Mount(mountpoint string) error {
 }
 
 func (f *fallbackMounter) Unmount() error { return f.inner.Unmount() }
+
+func (*fallbackMounter) Backend() string { return "webdav" }

@@ -52,6 +52,8 @@ func (f *fuseMounter) Unmount() error {
 	return nil
 }
 
+func (*fuseMounter) Backend() string { return "fuse" }
+
 // --- FUSE callbacks ---------------------------------------------------------
 
 func (f *fuseMounter) Getattr(p string, stat *fuse.Stat_t, fh uint64) int {

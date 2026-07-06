@@ -36,6 +36,20 @@ type Config struct {
 	Lock func()
 	// Mounted reports the current mount state for STATUS.
 	Mounted func() bool
+	// Serving, when set, augments STATUS with transport-backend detail so a
+	// client (the app) can distinguish "unmounted + wiped" (mounted=false)
+	// from "serving over WebDAV because the host has no FUSE" (mounted=true,
+	// backend=webdav). Optional for backward compatibility.
+	Serving func() ServeInfo
+}
+
+// ServeInfo describes which frontend is actually serving the VFS, for STATUS.
+type ServeInfo struct {
+	Backend       string // "fuse" | "webdav" | "none"
+	FuseActive    bool   // a real kernel FUSE mount is serving
+	FuseError     string // last FUSE mount error (empty when on WebDAV fallback)
+	WebdavServing bool   // loopback WebDAV server is up
+	WebdavAddr    string // bound WebDAV loopback address (informational)
 }
 
 // MemoryNode is the daemon-side control endpoint.
@@ -82,6 +96,14 @@ func (n *MemoryNode) onData(b []byte) {
 		}
 		return
 	}
+	// A non-sys frame is a real RPC from the vault peer, which proves it is
+	// connected right now. Cancel any pending grace even if the hub's
+	// peer_online presence frame was missed/never relayed (wrong session, role
+	// mismatch, or a hub blip). Without this, a secret pushed by an actively
+	// connected app could be wiped ~grace later purely because presence frames
+	// are a separate, unreliable channel. Presence still (re)arms grace on
+	// peer_offline, so "app went away -> lock" is unchanged.
+	n.cancelGrace()
 	reply, isReq := n.disp.Dispatch(b)
 	if isReq && reply != nil {
 		n.mu.Lock()
@@ -188,11 +210,19 @@ func (n *MemoryNode) register() {
 		if n.cfg.Mounted != nil {
 			mounted = n.cfg.Mounted()
 		}
-		return map[string]any{
+		res := map[string]any{
 			"mounted": mounted,
 			"used":    fs.Used(),
 			"version": fs.Version(),
-		}, nil
+		}
+		if n.cfg.Serving != nil {
+			s := n.cfg.Serving()
+			res["backend"] = s.Backend
+			res["serving"] = s.FuseActive || s.WebdavServing
+			res["fuse"] = map[string]any{"active": s.FuseActive, "error": s.FuseError}
+			res["webdav"] = map[string]any{"serving": s.WebdavServing, "addr": s.WebdavAddr}
+		}
+		return res, nil
 	})
 
 	n.disp.Handle(rpc.MethodManifest, func(req rpc.Message) (map[string]any, error) {

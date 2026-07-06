@@ -88,3 +88,5 @@ func (w *WebdavMounter) Unmount() error {
 	defer cancel()
 	return srv.Shutdown(ctx)
 }
+
+func (*WebdavMounter) Backend() string { return "webdav" }
