@@ -32,8 +32,16 @@ type Config struct {
 	// Zero means lock immediately on disconnect.
 	Grace time.Duration
 	// Lock performs the actual unmount + heap wipe. Called on grace expiry and
-	// on explicit UNMOUNT/LOCK requests.
+	// on an explicit LOCK request.
 	Lock func()
+	// Unmount stops serving the VFS WITHOUT wiping the heap (the UNMOUNT RPC).
+	// Distinct from Lock, which unmounts AND wipes. Optional; if nil, UNMOUNT
+	// falls back to Lock for backward compatibility.
+	Unmount func()
+	// Remount re-establishes the VFS mount if it was torn down (after a
+	// LOCK/UNMOUNT or grace auto-lock). Called when a WRITE arrives so a
+	// re-push re-serves the data instead of orphaning it in an unmounted heap.
+	Remount func()
 	// Mounted reports the current mount state for STATUS.
 	Mounted func() bool
 	// Serving, when set, augments STATUS with transport-backend detail so a
@@ -175,6 +183,12 @@ func (n *MemoryNode) register() {
 		if err != nil {
 			return nil, err
 		}
+		// A write means the vault wants data served again. If a prior LOCK/UNMOUNT
+		// or grace auto-lock tore the mount down, re-establish it so the re-pushed
+		// secret is actually served instead of orphaned in an unmounted heap.
+		if n.cfg.Remount != nil {
+			n.cfg.Remount()
+		}
 		if dir := path.Dir(p); dir != "" && dir != "/" {
 			_ = fs.MkdirAll(dir, 0o755)
 		}
@@ -195,15 +209,26 @@ func (n *MemoryNode) register() {
 		return map[string]any{"ok": true}, nil
 	})
 
-	lock := func(req rpc.Message) (map[string]any, error) {
+	// LOCK: unmount AND wipe the heap (deny-by-default panic / screensaver).
+	n.disp.Handle(rpc.MethodLock, func(req rpc.Message) (map[string]any, error) {
 		n.cancelGrace()
 		if n.cfg.Lock != nil {
 			n.cfg.Lock()
 		}
 		return map[string]any{"locked": true}, nil
-	}
-	n.disp.Handle(rpc.MethodUnmount, lock)
-	n.disp.Handle(rpc.MethodLock, lock)
+	})
+
+	// UNMOUNT: stop serving but PRESERVE the heap (distinct from LOCK). Falls back
+	// to Lock if no unmount-only hook was wired, for backward compatibility.
+	n.disp.Handle(rpc.MethodUnmount, func(req rpc.Message) (map[string]any, error) {
+		n.cancelGrace()
+		if n.cfg.Unmount != nil {
+			n.cfg.Unmount()
+		} else if n.cfg.Lock != nil {
+			n.cfg.Lock()
+		}
+		return map[string]any{"unmounted": true}, nil
+	})
 
 	n.disp.Handle(rpc.MethodStatus, func(req rpc.Message) (map[string]any, error) {
 		mounted := false

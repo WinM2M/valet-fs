@@ -34,6 +34,61 @@ func TestInboundRPCCancelsGrace(t *testing.T) {
 	}
 }
 
+// A WRITE after a LOCK (unmount + wipe) must auto-remount so the re-pushed
+// secret is served again instead of being orphaned in an unmounted heap.
+func TestWriteRemountsAfterLock(t *testing.T) {
+	fs := vfs.New(0)
+	mounted := true
+	n := New(Config{
+		FS:      fs,
+		Mounted: func() bool { return mounted },
+		Lock:    func() { mounted = false; fs.Wipe() },
+		Remount: func() { mounted = true },
+	})
+
+	n.onData([]byte(`{"v":1,"type":"REQ","id":"1","method":"LOCK"}`))
+	if mounted {
+		t.Fatal("expected unmounted after LOCK")
+	}
+	n.onData([]byte(`{"v":1,"type":"REQ","id":"2","method":"WRITE","params":{"path":"/keys/x","content":"hi"}}`))
+	if !mounted {
+		t.Fatal("expected auto-remount after WRITE following a LOCK")
+	}
+	if fs.Used() == 0 {
+		t.Fatal("expected the re-pushed file to be written")
+	}
+}
+
+// UNMOUNT preserves the heap (stops serving only); LOCK wipes it.
+func TestUnmountKeepsHeapLockWipes(t *testing.T) {
+	fs := vfs.New(0)
+	_ = fs.MkdirAll("/keys", 0o755)
+	_ = fs.Write("/keys/x", []byte("secret"), 0o600)
+	unmounted, wiped := 0, 0
+	n := New(Config{
+		FS:      fs,
+		Mounted: func() bool { return true },
+		Lock:    func() { wiped++; fs.Wipe() },
+		Unmount: func() { unmounted++ },
+	})
+
+	n.onData([]byte(`{"v":1,"type":"REQ","id":"1","method":"UNMOUNT"}`))
+	if unmounted != 1 || wiped != 0 {
+		t.Fatalf("UNMOUNT should call Unmount only (unmounted=%d wiped=%d)", unmounted, wiped)
+	}
+	if fs.Used() == 0 {
+		t.Fatal("UNMOUNT wiped the heap (should preserve it)")
+	}
+
+	n.onData([]byte(`{"v":1,"type":"REQ","id":"2","method":"LOCK"}`))
+	if wiped != 1 {
+		t.Fatal("LOCK should wipe the heap")
+	}
+	if fs.Used() != 0 {
+		t.Fatal("LOCK did not wipe the heap")
+	}
+}
+
 // Deny-by-default preserved: with no activity at all, ArmGrace still auto-locks.
 func TestArmGraceLocksWithoutActivity(t *testing.T) {
 	fs := vfs.New(0)
