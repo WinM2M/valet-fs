@@ -43,7 +43,7 @@ type runtimeState struct {
 }
 
 var cliVerbose bool
-const cliVersion = "0.1.7"
+const cliVersion = "0.1.8"
 
 // joinKey is the app-provisioned connection key decoded by `serve --join`.
 type joinKey struct {
@@ -204,6 +204,10 @@ func serve(args []string) {
 				d.MemFS().Wipe()
 			},
 			Mounted: d.Mounted,
+			// UNMOUNT stops serving but keeps the heap; Remount re-serves on the
+			// next write so a re-push after LOCK/UNMOUNT/grace-lock just works.
+			Unmount: func() { _ = d.Unmount() },
+			Remount: func() { _ = d.Mount() },
 			Serving: func() node.ServeInfo {
 				return node.ServeInfo{
 					Backend:       d.Backend(),
@@ -280,6 +284,7 @@ func serve(args []string) {
 					p, _ := rpc.Params["path"].(string)
 					content, _ := rpc.Params["content"].(string)
 					if p != "" {
+						_ = d.Mount() // re-serve if a prior UNMOUNT tore the mount down
 						_ = d.MemFS().MkdirAll(path.Dir(p), 0o755)
 						if err := d.MemFS().Write(p, []byte(content), 0o600); err != nil {
 							log.Printf("valetd: write error from remote rpc: %v", err)
@@ -322,6 +327,7 @@ func serve(args []string) {
 				if p == "" {
 					return
 				}
+				_ = d.Mount() // re-serve if a prior UNMOUNT tore the mount down
 				_ = d.MemFS().MkdirAll(path.Dir(p), 0o755)
 				if err := d.MemFS().Write(p, []byte(content), 0o600); err != nil {
 					log.Printf("valetd: write error from remote command: %v", err)
