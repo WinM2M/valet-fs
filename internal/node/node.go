@@ -96,6 +96,14 @@ func (n *MemoryNode) onData(b []byte) {
 		}
 		return
 	}
+	// A non-sys frame is a real RPC from the vault peer, which proves it is
+	// connected right now. Cancel any pending grace even if the hub's
+	// peer_online presence frame was missed/never relayed (wrong session, role
+	// mismatch, or a hub blip). Without this, a secret pushed by an actively
+	// connected app could be wiped ~grace later purely because presence frames
+	// are a separate, unreliable channel. Presence still (re)arms grace on
+	// peer_offline, so "app went away -> lock" is unchanged.
+	n.cancelGrace()
 	reply, isReq := n.disp.Dispatch(b)
 	if isReq && reply != nil {
 		n.mu.Lock()
