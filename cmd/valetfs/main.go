@@ -43,6 +43,7 @@ type runtimeState struct {
 }
 
 var cliVerbose bool
+
 const cliVersion = "0.1.8"
 
 // joinKey is the app-provisioned connection key decoded by `serve --join`.
@@ -144,7 +145,18 @@ func serve(args []string) {
 	if err := d.StartDevAPI(); err != nil {
 		log.Fatalf("valetd: control api: %v", err)
 	}
-	if err := d.Mount(); err != nil {
+	// A resumed daemon (persisted key -> same session) must come back locked:
+	// the session identity survives, the secrets do not. The app re-serves by
+	// pushing again, exactly as it does after hiding the files.
+	resuming := false
+	if cfg.ResumeKeyFile != "" {
+		if st, err := os.Stat(cfg.ResumeKeyFile); err == nil && st.Size() > 0 {
+			resuming = true
+		}
+	}
+	if resuming {
+		log.Println("valetd: resuming a persisted session identity; starting locked (no files served until the app pushes)")
+	} else if err := d.Mount(); err != nil {
 		log.Fatalf("valetd: mount: %v", err)
 	}
 
@@ -152,8 +164,18 @@ func serve(args []string) {
 		log.Println("valetd: starting in DEV mode (no WebRTC)")
 	} else if cfg.Transport == "ws" {
 		log.Println("valetd: starting in PRODUCTION mode (ws transport)")
-		kp, err := e2ee.Generate()
-		if err != nil {
+		var kp *e2ee.KeyPair
+		var err error
+		if cfg.ResumeKeyFile != "" {
+			var reused bool
+			kp, reused, err = e2ee.LoadOrGenerate(cfg.ResumeKeyFile)
+			if err != nil {
+				log.Fatalf("valetd: e2ee key file: %v", err)
+			}
+			if reused {
+				log.Println("valetd: reusing the persisted E2EE key (session identity preserved)")
+			}
+		} else if kp, err = e2ee.Generate(); err != nil {
 			log.Fatalf("valetd: e2ee keygen: %v", err)
 		}
 		var rawConn *ws.Conn

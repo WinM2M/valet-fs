@@ -2,6 +2,8 @@ package e2ee
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -62,5 +64,51 @@ func TestTamperFails(t *testing.T) {
 	bad[len(bad)-2] ^= 0x01
 	if _, err := s.open(string(bad)); err == nil {
 		t.Fatal("expected open to fail on tampered ciphertext")
+	}
+}
+
+func TestLoadOrGeneratePersistsIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "e2ee.key")
+
+	first, reused, err := LoadOrGenerate(path)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if reused {
+		t.Fatal("first call reported a reused key for a path that did not exist")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("key file not written: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("key file mode = %o, want 600", perm)
+	}
+
+	second, reused, err := LoadOrGenerate(path)
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if !reused {
+		t.Error("second call did not report the key as reused")
+	}
+	// The public key is what the hub pins for the session's lifetime, so a
+	// restart must republish exactly the same value or the rejoin is rejected.
+	if second.PubB64() != first.PubB64() {
+		t.Errorf("pub changed across restart: %q -> %q", first.PubB64(), second.PubB64())
+	}
+	if second.Priv != first.Priv {
+		t.Error("private key changed across restart")
+	}
+}
+
+func TestLoadOrGenerateRejectsShortKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "e2ee.key")
+	if err := os.WriteFile(path, []byte("too short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadOrGenerate(path); err == nil {
+		t.Fatal("truncated key file accepted; want an error")
 	}
 }

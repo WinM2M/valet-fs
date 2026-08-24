@@ -58,6 +58,12 @@ type Config struct {
 	// offline before auto-locking (ws transport). 0 = lock immediately.
 	GraceSeconds int
 
+	// ResumeKeyFile persists the daemon's X25519 private key at this path so a
+	// restarted daemon can rejoin the same session (the hub pins daemon_pub for
+	// the session's lifetime). Empty (the default) keeps the key in memory only,
+	// so every start is a new identity. A resumed daemon comes back locked.
+	ResumeKeyFile string
+
 	// JoinKey, when set, joins an app-provisioned session (reverse flow) as the
 	// daemon instead of creating a new session. Implies ws transport.
 	JoinKey string
@@ -84,6 +90,7 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&cfg.Transport, "transport", defaultEnv("VALETFS_TRANSPORT", "ws"), "Control-plane transport: ws (default)|webrtc")
 	fs.StringVar(&cfg.JoinKey, "join", defaultEnv("VALETFS_JOIN", ""), "Join an app-provisioned session with a connection key (reverse flow)")
 	fs.IntVar(&cfg.GraceSeconds, "grace", defaultEnvInt("VALETFS_GRACE", 300), "Seconds to keep VFS mounted after vault goes offline (ws transport; 0 = immediate)")
+	fs.StringVar(&cfg.ResumeKeyFile, "resume-key-file", defaultEnv("VALETFS_RESUME_KEY_FILE", ""), "Persist the daemon X25519 key here so a restart rejoins the same session (starts locked; off by default)")
 
 	var quotaMB int64
 	fs.Int64Var(&quotaMB, "quota-mb", 5, "Cluster quota in megabytes")
