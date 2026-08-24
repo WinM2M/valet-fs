@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ValetFS — Support</title>
+<link rel="stylesheet" href="./_style.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <h1>ValetFS Support</h1>
+    <p class="meta">Help for the ValetFS iOS app and the ValetFS daemon.</p>
+  </div>
+
+  <div class="card">
+    <p><strong>Email:</strong> <a href="mailto:yjkwon@winm2m.com">yjkwon@winm2m.com</a><br>
+    <strong>Issues:</strong> <a href="https://github.com/WinM2M/valet-fs/issues">github.com/WinM2M/valet-fs/issues</a><br>
+    We aim to reply within two business days.</p>
+  </div>
+
+  <h2>Getting started</h2>
+  <p>ValetFS has two halves: the <strong>iOS app</strong> (the vault, which holds your secrets) and
+  the <strong>daemon</strong> (which runs on the computer where an AI agent or tool needs those
+  secrets). The app is useless on its own — install the daemon first.</p>
+  <p>On the computer, install and start the daemon:</p>
+  <p><code>curl -fsSL https://winm2m.github.io/valet-fs/install.sh | bash</code><br>
+  then <code>valetfs serve</code></p>
+  <p>It prints a QR code. In the app, tap <em>Pair a daemon</em> and scan it. Full instructions are
+  in the <a href="./">installation guide</a>.</p>
+
+  <h2>Common questions</h2>
+
+  <h3>The daemon shows &ldquo;offline&rdquo; but the process is running.</h3>
+  <p>The daemon needs outbound WebSocket access to
+  <code>valetfs-signaling.winm2m.workers.dev</code>. Corporate proxies and firewalls that block
+  WebSocket upgrades are the usual cause. Upgrade to the latest daemon version, which sends a
+  keepalive every 25 seconds.</p>
+
+  <h3>My files disappeared from the daemon.</h3>
+  <p>That is the design. When the app goes offline a grace timer starts, and when it expires the
+  daemon unmounts and wipes its memory — nothing is written to disk. Reopen the app to reconnect and
+  re-push. You can change the grace period, including to zero, on the session screen.</p>
+
+  <h3>The app will not let me open a secret.</h3>
+  <p>Reading a secret requires Face ID, Touch ID or a device passcode. If your device has none
+  enrolled, the app denies access by design rather than falling open. Enrol a passcode in
+  <em>Settings &rarr; Face ID &amp; Passcode</em>.</p>
+
+  <h3>QR scanning does not work.</h3>
+  <p>Grant camera access in <em>Settings &rarr; ValetFS &rarr; Camera</em>. If you cannot scan, use
+  <em>Enter Session ID manually</em> on the pairing screen instead.</p>
+
+  <h3>The app warns that the daemon key changed.</h3>
+  <p>ValetFS pins a daemon's public key the first time it pairs. A change means either the daemon
+  was reinstalled, or someone is impersonating it. If you did not reinstall, do not proceed —
+  &ldquo;Forget&rdquo; the session and pair again by scanning the QR code in person.</p>
+
+  <h2>Reporting a security issue</h2>
+  <p>Please email <a href="mailto:yjkwon@winm2m.com">yjkwon@winm2m.com</a> directly rather than
+  opening a public issue.</p>
+
+  <footer>ValetFS · <a href="./">Installation guide</a> · <a href="./privacy.html">Privacy policy</a></footer>
+</div>
+</body>
+</html>
