@@ -23,7 +23,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/anomalyco/valet-fs/internal/transport"
@@ -235,9 +239,9 @@ func (c *Conn) Start() {
 	}
 }
 
-func (c *Conn) OnData(fn func([]byte))  { c.mu.Lock(); c.onData = fn; c.mu.Unlock() }
-func (c *Conn) OnOpen(fn func())        { c.mu.Lock(); c.onOpen = fn; c.mu.Unlock() }
-func (c *Conn) OnClose(fn func())       { c.mu.Lock(); c.onClose = fn; c.mu.Unlock(); c.inner.OnClose(fn) }
+func (c *Conn) OnData(fn func([]byte)) { c.mu.Lock(); c.onData = fn; c.mu.Unlock() }
+func (c *Conn) OnOpen(fn func())       { c.mu.Lock(); c.onOpen = fn; c.mu.Unlock() }
+func (c *Conn) OnClose(fn func())      { c.mu.Lock(); c.onClose = fn; c.mu.Unlock(); c.inner.OnClose(fn) }
 
 // Send encrypts and transmits an app frame. Fails if the session is not ready.
 func (c *Conn) Send(b []byte) error {
@@ -256,3 +260,40 @@ func (c *Conn) Send(b []byte) error {
 }
 
 func (c *Conn) Close() error { return c.inner.Close() }
+
+// LoadOrGenerate returns the key pair stored at path, creating and persisting a
+// fresh one if the file does not exist yet. The second return value reports
+// whether an existing key was reused, which callers use to tell a first run
+// apart from a restart.
+//
+// Persisting the daemon's private key is opt-in: it trades a secret at rest for
+// a session identity that survives a daemon restart, because the hub pins
+// daemon_pub for the lifetime of a session and rejects a different key.
+func LoadOrGenerate(path string) (*KeyPair, bool, error) {
+	if b, err := os.ReadFile(path); err == nil {
+		if len(b) != 32 {
+			return nil, false, fmt.Errorf("key file %s: want 32 bytes, got %d", path, len(b))
+		}
+		kp := &KeyPair{}
+		copy(kp.Priv[:], b)
+		pub, err := curve25519.X25519(kp.Priv[:], curve25519.Basepoint)
+		if err != nil {
+			return nil, false, fmt.Errorf("key file %s: %w", path, err)
+		}
+		copy(kp.Pub[:], pub)
+		return kp, true, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, false, err
+	}
+	kp, err := Generate()
+	if err != nil {
+		return nil, false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, false, err
+	}
+	if err := os.WriteFile(path, kp.Priv[:], 0o600); err != nil {
+		return nil, false, err
+	}
+	return kp, false, nil
+}
