@@ -3,7 +3,7 @@ name: Deploy Pages
 on:
   push:
     branches: ["main"]
-    paths: ["scripts/install.sh", "docs/index.html", ".github/workflows/pages.yml"]
+    paths: ["scripts/install.sh", "docs/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -21,11 +21,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Prepare install script
+      - name: Assemble site
         run: |
           mkdir -p _site
+          cp -R docs/. _site/
           cp scripts/install.sh _site/install.sh
-          cp docs/index.html _site/index.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
