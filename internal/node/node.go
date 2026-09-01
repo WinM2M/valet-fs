@@ -68,6 +68,10 @@ type MemoryNode struct {
 	mu    sync.Mutex
 	conn  transport.Conn
 	grace *time.Timer
+	// When a countdown is running, the instant it fires. Zero otherwise. Kept
+	// alongside the timer because time.Timer cannot be asked how much is left,
+	// and callers need to see the deadline, not just that one exists.
+	graceEnd time.Time
 }
 
 // New builds a node and registers its handlers.
@@ -145,6 +149,7 @@ func (n *MemoryNode) startGrace() {
 			lock()
 		}
 	})
+	n.graceEnd = time.Now().Add(d)
 	n.mu.Unlock()
 }
 
@@ -154,7 +159,25 @@ func (n *MemoryNode) cancelGrace() {
 		n.grace.Stop()
 		n.grace = nil
 	}
+	n.graceEnd = time.Time{}
 	n.mu.Unlock()
+}
+
+// GraceState reports the configured window, whether a countdown is currently
+// running, and how much of it is left. Without this a client can neither show
+// which grace is in effect nor tell that secrets are already on a deadline.
+func (n *MemoryNode) GraceState() (configured time.Duration, armed bool, remaining time.Duration) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	configured = n.cfg.Grace
+	if n.grace == nil || n.graceEnd.IsZero() {
+		return configured, false, 0
+	}
+	remaining = time.Until(n.graceEnd)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return configured, true, remaining
 }
 
 // ArmGrace starts the grace countdown as if the vault were offline. The reverse
@@ -162,11 +185,19 @@ func (n *MemoryNode) cancelGrace() {
 // forever; a vault coming online cancels it.
 func (n *MemoryNode) ArmGrace() { n.startGrace() }
 
-// SetGrace updates the grace duration at runtime.
+// SetGrace updates the grace window at runtime. A countdown already in flight
+// is restarted against the new window: otherwise raising the grace after the
+// vault went offline would silently leave the old, shorter deadline armed, and
+// the caller has no way to observe or undo that.
 func (n *MemoryNode) SetGrace(d time.Duration) {
 	n.mu.Lock()
 	n.cfg.Grace = d
+	rearm := n.grace != nil
 	n.mu.Unlock()
+	if rearm {
+		// startGrace takes the same lock, so it must be called unlocked.
+		n.startGrace()
+	}
 }
 
 // --- handlers ---
@@ -235,10 +266,16 @@ func (n *MemoryNode) register() {
 		if n.cfg.Mounted != nil {
 			mounted = n.cfg.Mounted()
 		}
+		graceCfg, graceArmed, graceLeft := n.GraceState()
 		res := map[string]any{
-			"mounted": mounted,
-			"used":    fs.Used(),
-			"version": fs.Version(),
+			"mounted":       mounted,
+			"used":          fs.Used(),
+			"version":       fs.Version(),
+			"grace_seconds": int64(graceCfg / time.Second),
+			"grace_armed":   graceArmed,
+		}
+		if graceArmed {
+			res["grace_remaining_seconds"] = int64(graceLeft / time.Second)
 		}
 		if n.cfg.Serving != nil {
 			s := n.cfg.Serving()
