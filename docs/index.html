@@ -132,6 +132,19 @@
     </ul>
     <pre><code>curl -fsSL https://winm2m.github.io/valet-fs/install.sh | VALETFS_VERSION=v0.1.0 INSTALL_DIR=$HOME/.local/bin bash</code></pre>
 
+    <h2>AI agent skill (Claude Code)</h2>
+    <p>
+      If you hand a connection key to a skill-capable agent, install the ValetFS
+      skill on that machine as well. It makes the agent check your vault before
+      reading credentials from disk or environment variables &mdash; in every later
+      session, not just the one where you pasted the key.
+    </p>
+    <pre><code>curl -fsSL https://winm2m.github.io/valet-fs/install-skill.sh | bash</code></pre>
+    <p>
+      Installs to <code>~/.claude/skills/valetfs/</code>. Set <code>SKILL_DIR=</code>
+      to scope it to a single project instead.
+    </p>
+
     <h2>Quick Start After Install</h2>
     <pre><code>valetfs serve --dev
 valetfs status</code></pre>

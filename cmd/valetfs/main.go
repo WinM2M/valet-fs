@@ -240,6 +240,9 @@ func serve(args []string) {
 				}
 			},
 		})
+		// The node owns the grace timer; surface it on the local control API so
+		// `valetfs status` can report the countdown without a paired app.
+		d.SetGraceReporter(n.GraceState)
 
 		// attach wires a raw ws conn through E2EE into the node, and installs a
 		// reconnect-or-self-lock handler for when the control-plane link drops.

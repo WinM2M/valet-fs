@@ -37,6 +37,18 @@ type Daemon struct {
 	webdavOn bool
 	devSrv   *http.Server
 	devAddr  string
+	// Optional reporter for the grace countdown, which the node owns. Set by
+	// the caller once both exist so `valetfs status` can answer "how long until
+	// this locks?" without a paired app.
+	graceState func() (time.Duration, bool, time.Duration)
+}
+
+// SetGraceReporter lets the owner of the grace timer expose it on the local
+// control API. Safe to leave unset; status simply omits the grace fields.
+func (d *Daemon) SetGraceReporter(fn func() (time.Duration, bool, time.Duration)) {
+	d.mu.Lock()
+	d.graceState = fn
+	d.mu.Unlock()
 }
 
 type RuntimeState struct {
@@ -297,10 +309,11 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	mounted := d.mounted
 	fuseErr := d.fuseErr
 	webdavOn := d.webdavOn
+	graceState := d.graceState
 	d.mu.Unlock()
 	backend := d.mounter.Backend()
 	fuseActive := mounted && fuseErr == "" && backend == "fuse"
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"mounted":    mounted,
 		"mountpoint": d.cfg.MountPoint,
 		"backend":    backend,
@@ -317,9 +330,19 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"serving": webdavOn,
 			"addr":    d.webdav.Addr(),
 		},
-		"used":  d.fs.Used(),
-		"quota": d.cfg.QuotaBytes,
-	})
+		"used":    d.fs.Used(),
+		"quota":   d.cfg.QuotaBytes,
+		"version": d.fs.Version(),
+	}
+	if graceState != nil {
+		cfgGrace, armed, left := graceState()
+		body["grace_seconds"] = int64(cfgGrace / time.Second)
+		body["grace_armed"] = armed
+		if armed {
+			body["grace_remaining_seconds"] = int64(left / time.Second)
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleFiles exposes a small POST/GET/DELETE surface for dev testing without
