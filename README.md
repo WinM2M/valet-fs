@@ -24,7 +24,18 @@ No root, drivers, or FUSE are required — if FUSE is unavailable the daemon
 serves files over a loopback WebDAV endpoint and the local CLI instead. To
 install without sudo: `... | INSTALL_DIR=$HOME/.local/bin bash` (and ensure that
 dir is on `PATH`). On macOS/Windows or unsupported arches, build from source:
-`git clone https://github.com/winm2m/valet-fs && cd valet-fs/valet-fs && go build -o valetfs ./cmd/valetfs`.
+`git clone https://github.com/winm2m/valet-fs && cd valet-fs && go build -o valetfs ./cmd/valetfs`.
+
+**1b. Install the agent skill** (Claude Code and other skill-capable agents):
+
+```sh
+curl -fsSL https://winm2m.github.io/valet-fs/install-skill.sh | bash
+```
+
+This drops a `valetfs` skill into `~/.claude/skills/`, so the agent keeps
+checking the vault before reading credentials off disk in *later* sessions too —
+not just the conversation where the key was pasted. Set `SKILL_DIR=` to install
+into one project instead. Skip if your tool has no skill mechanism.
 
 **2. Join the session** with the key the user gave you:
 
@@ -38,10 +49,14 @@ background process). Once the user pushes secrets from the app, read them with
 the local CLI (separate terminal / process):
 
 ```sh
-valetfs ls /keys              # list what the app pushed
-valetfs cat /keys/github      # read one secret
-valetfs status                # mount state + bytes used
+valetfs ls -l fs:/keys        # list what the app pushed, with sizes
+valetfs cat fs:/keys/github   # read one secret
+valetfs status                # mount state, bytes used, grace countdown
 ```
+
+Vault paths need the `fs:` prefix — a bare `/keys` is read as a path on *this*
+machine. `ls`/`cat` reject that outright, but `cp`/`mv` accept both kinds and
+infer the direction, so omitting it there silently writes plaintext to disk.
 
 Notes for agents:
 

@@ -3,7 +3,12 @@ name: Deploy Pages
 on:
   push:
     branches: ["main"]
-    paths: ["scripts/install.sh", "docs/**", ".github/workflows/pages.yml"]
+    paths:
+      - "scripts/install.sh"
+      - "scripts/install-skill.sh"
+      - "skills/**"
+      - "docs/**"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -26,6 +31,7 @@ jobs:
           mkdir -p _site
           cp -R docs/. _site/
           cp scripts/install.sh _site/install.sh
+          cp scripts/install-skill.sh _site/install-skill.sh
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
