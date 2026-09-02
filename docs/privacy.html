@@ -11,14 +11,15 @@
   <div class="hero">
     <h1>ValetFS Privacy Policy</h1>
     <p class="meta">Applies to the <strong>ValetFS</strong> iOS application published by Youngjune Kwon.<br>
-    Effective 23 August 2026 · Last updated 23 August 2026</p>
+    Effective 23 August 2026 · Last updated 1 September 2026</p>
   </div>
 
   <div class="card">
     <p><strong>Summary.</strong> ValetFS has no user accounts, no analytics, no advertising and no
-    tracking of any kind. Your secrets are stored in the iOS Keychain on your own device and are
-    end-to-end encrypted before they ever leave it. We — the developer — cannot read them, and
-    neither can the relay they pass through.</p>
+    tracking of any kind. Your secrets are stored in the iOS Keychain, on your own device and
+    &mdash; if you switch it on &mdash; in your iCloud Keychain, and they are end-to-end encrypted
+    before they ever leave your phone for a paired computer. We &mdash; the developer &mdash; cannot
+    read them; neither can the relay they pass through, nor Apple.</p>
   </div>
 
   <h2>1. What ValetFS does</h2>
@@ -34,15 +35,35 @@
 
   <h2>3. Information stored on your device</h2>
   <ul>
-    <li><strong>Secrets.</strong> The contents of your vault are written to the iOS Keychain (via
-      <code>expo-secure-store</code>). Reading or sending a secret requires Face ID, Touch ID or your
-      device passcode. If no biometric or passcode is enrolled, the app denies access rather than
-      falling open.</li>
+    <li><strong>Secrets.</strong> The contents of your vault, and the list of the paths you have
+      stored, are written to the iOS Keychain. Reading or sending a secret requires Face ID, Touch ID
+      or your device passcode. If no biometric or passcode is enrolled, the app denies access rather
+      than falling open.</li>
     <li><strong>Pairing records.</strong> Session identifiers, the signaling URL and the daemon's
       public key are kept in app storage so the app can reconnect. Removing a pairing
       (&ldquo;Forget&rdquo;) deletes it.</li>
   </ul>
   <p>Deleting the app removes all of this local data.</p>
+
+  <h2>3a. Multi-device sync (optional, off until you choose)</h2>
+  <p>ValetFS can keep your vault in your <strong>iCloud Keychain</strong> instead of only on one
+  phone, so that opening the app on another device signed into the same Apple Account gives you the
+  same vault. The app asks once and does nothing until you answer; you can change the choice at any
+  time in <em>Settings</em>.</p>
+  <ul>
+    <li><strong>What is synced.</strong> The secrets themselves and the index of their paths. Nothing
+    else &mdash; pairing records stay on each device.</li>
+    <li><strong>Who can read it.</strong> iCloud Keychain is end-to-end encrypted with keys derived
+    on your devices. Apple stores the items and cannot read them, and neither can we. This is Apple's
+    service, governed by Apple's privacy policy; we receive nothing from it and have no visibility
+    into it.</li>
+    <li><strong>Turning it off deletes the iCloud copies.</strong> The device you switch it off on
+    keeps everything. But iCloud Keychain propagates that deletion to your other devices, and those
+    devices hold only the iCloud copy &mdash; so ValetFS there will be empty. The app warns you
+    before doing this.</li>
+    <li><strong>If you never switch it on</strong>, no secret and no path ever leaves your phone
+    except end-to-end encrypted to a daemon you paired yourself.</li>
+  </ul>
 
   <h2>4. Information transmitted, and to whom</h2>
 
