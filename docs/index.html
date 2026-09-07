@@ -1,220 +1,329 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ValetFS Installation Guide</title>
-  <style>
-    :root {
-      --bg: #f4f1ea;
-      --card: #fffdf8;
-      --ink: #1e2a28;
-      --muted: #4f5f5c;
-      --line: #dcd3c4;
-      --accent: #0f766e;
-      --accent-2: #155e75;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      font-family: "Noto Sans KR", "Pretendard", sans-serif;
-      background:
-        radial-gradient(circle at 12% 0%, #e8f1ef 0%, transparent 36%),
-        radial-gradient(circle at 100% 100%, #e3eef2 0%, transparent 30%),
-        var(--bg);
-      line-height: 1.6;
-    }
-    .wrap { max-width: 920px; margin: 0 auto; padding: 40px 20px 56px; }
-    .hero {
-      background: linear-gradient(130deg, #f5fbfa 0%, #eef6f8 60%, #fdfcf8 100%);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 28px;
-      box-shadow: 0 12px 35px rgba(29, 42, 40, 0.08);
-    }
-    h1 { margin: 0 0 8px; font-size: 2rem; }
-    h2 { margin-top: 32px; font-size: 1.35rem; color: var(--accent-2); }
-    p { margin: 10px 0; }
-    ul { padding-left: 20px; }
-    code {
-      font-family: "JetBrains Mono", "Fira Code", monospace;
-      background: #f2efea;
-      padding: 2px 6px;
-      border-radius: 6px;
-      font-size: 0.95em;
-    }
-    pre {
-      margin: 14px 0;
-      padding: 14px;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      background: #fff;
-      overflow-x: auto;
-      position: relative;
-    }
-    .copy-btn {
-      position: absolute;
-      top: 8px;
-      right: 8px;
-      width: 32px;
-      height: 32px;
-      border: 1px solid #d6d0c4;
-      border-radius: 8px;
-      background: #fff;
-      color: #33524d;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: background-color 0.15s ease, border-color 0.15s ease;
-    }
-    .copy-btn:hover { background: #f3f7f6; border-color: #b8ccc7; }
-    .copy-btn:active { background: #eaf2f0; }
-    .copy-btn svg { width: 16px; height: 16px; }
-    .badge {
-      display: inline-block;
-      margin-bottom: 10px;
-      padding: 4px 10px;
-      border-radius: 999px;
-      border: 1px solid #bed6d3;
-      background: #ecf7f6;
-      color: #115e59;
-      font-size: 0.8rem;
-      font-weight: 700;
-    }
-    @media (max-width: 700px) {
-      .wrap { padding: 20px 14px 36px; }
-      .hero { padding: 20px; border-radius: 14px; }
-      h1 { font-size: 1.6rem; }
-    }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ValetFS — Hand over use. Not possession.</title>
+<meta name="description" content="ValetFS keeps your API keys on your phone and lends them to your AI agent's machine — into memory, never onto disk — and takes them back when the work is done.">
+<meta property="og:title" content="ValetFS — Hand over use. Not possession.">
+<meta property="og:description" content="Your secrets live on your phone. Your agent borrows them into memory, never onto disk, and only while you allow it.">
+<meta property="og:image" content="https://winm2m.github.io/valet-fs/media/icon.png">
+<meta property="og:type" content="website">
+<link rel="icon" href="media/icon.png">
+<style>
+  :root{
+    --navy:#050B1F; --panel:#0c1428; --line:#1b2743;
+    --ink:#e8eefc; --muted:#9fb6dd; --blue:#1976D2; --sky:#7dd3fc; --green:#4ade80;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--navy); color:var(--ink); line-height:1.65;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px;margin:0 auto;padding:0 22px}
+  a{color:var(--sky)}
+  h1,h2,h3{line-height:1.2;letter-spacing:-.02em}
+  h2{font-size:1.9rem;margin:0 0 14px}
+  h3{font-size:1.15rem;margin:26px 0 6px}
+  p{margin:12px 0;color:#cfdcf3}
+  section{padding:62px 0;border-top:1px solid var(--line)}
+  section:first-of-type{border-top:0}
+  .lead{font-size:1.15rem;color:var(--muted)}
+  .muted{color:var(--muted)}
+
+  /* hero */
+  header{padding:70px 0 56px;background:
+    radial-gradient(900px 520px at 78% 0%, #13203c 0%, transparent 62%)}
+  .hero{display:flex;gap:28px;align-items:center;flex-wrap:wrap}
+  .hero img{width:108px;height:108px;border-radius:25px;box-shadow:0 18px 44px rgba(0,0,0,.5)}
+  .hero h1{font-size:2.9rem;margin:0 0 6px}
+  .tagline{font-size:1.35rem;color:var(--sky);font-weight:700;margin:0}
+  .cta{display:flex;gap:12px;flex-wrap:wrap;margin-top:26px}
+  .btn{display:inline-block;padding:13px 22px;border-radius:12px;font-weight:700;
+       text-decoration:none;border:1px solid var(--line)}
+  .btn-primary{background:var(--blue);border-color:var(--blue);color:#fff}
+  .btn-ghost{background:transparent;color:var(--ink)}
+
+  /* video */
+  .video{position:relative;padding-top:56.25%;border-radius:16px;overflow:hidden;
+         border:1px solid var(--line);background:#000;margin:8px 0 4px}
+  .video iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+
+  /* figures */
+  figure{margin:26px 0}
+  figure img{width:100%;border-radius:14px;border:1px solid var(--line);display:block}
+  figcaption{margin-top:9px;font-size:.92rem;color:var(--muted);text-align:center}
+  .shots{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;margin:26px 0}
+  .shots figure{margin:0;flex:0 1 210px}
+  .shots img{border-radius:18px}
+
+  /* code */
+  pre{background:#0a1224;border:1px solid var(--line);border-radius:12px;
+      padding:15px 17px;overflow-x:auto;margin:14px 0}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92rem}
+  pre code{color:#cfe4ff}
+  p code,li code{background:#0f1a30;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:.9em}
+
+  /* callout */
+  .note{border-left:3px solid var(--blue);background:#0a1224;
+        border-radius:0 12px 12px 0;padding:14px 18px;margin:20px 0}
+  .warn{border-left-color:#fbbf24}
+
+  /* two-col */
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+  .card h3{margin-top:0}
+  @media (max-width:720px){ .cols{grid-template-columns:1fr} .hero h1{font-size:2.2rem} }
+
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:.95rem}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600}
+
+  footer{padding:46px 0 70px;border-top:1px solid var(--line);color:var(--muted);font-size:.93rem}
+  footer a{margin-right:18px}
+</style>
 </head>
 <body>
-  <main class="wrap">
-    <section class="hero">
-      <span class="badge">ValetFS GitHub Pages</span>
-      <h1>ValetFS Quick Install Overview</h1>
-      <p>
-        ValetFS is a <strong>zero-backend, P2P, in-memory virtual file system</strong>
-        desktop daemon. It is designed to expose short-lived tokens/keys to AI
-        agents only while a paired mobile app allows it.
-      </p>
-      <p>
-        This repository contains the Go-based daemon (<code>cmd/valetfs</code>)
-        and a Cloudflare Worker signaling stub for WebRTC bootstrap
-        (<code>signaling/</code>).
-      </p>
-    </section>
 
-    <h2>Core Project Components</h2>
+<header>
+  <div class="wrap hero">
+    <img src="media/icon.png" alt="ValetFS app icon">
+    <div>
+      <h1>ValetFS</h1>
+      <p class="tagline">Hand over use. Not possession.</p>
+    </div>
+  </div>
+  <div class="wrap">
+    <p class="lead" style="max-width:640px;margin-top:22px">
+      Your API keys live on your phone. Your AI agent borrows them into memory on its
+      machine — never onto its disk — and only while you allow it.
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://apps.apple.com/app/valetfs/id6804526734">Get it on the App Store</a>
+      <a class="btn btn-ghost" href="#install">Install the daemon</a>
+      <a class="btn btn-ghost" href="https://github.com/winm2m/valet-fs">Source on GitHub</a>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <div class="video">
+      <iframe src="https://www.youtube-nocookie.com/embed/uoYWnqIjdPY"
+              title="ValetFS — Your AI Agent Has Every Key You Own"
+              allow="accelerometer; clipboard-write; encrypted-media; picture-in-picture"
+              allowfullscreen loading="lazy"></iframe>
+    </div>
+    <p class="muted" style="text-align:center;font-size:.92rem">
+      Two minutes on why this exists. Narration is AI-generated.
+    </p>
+  </div>
+</section>
+
+<section id="problem">
+  <div class="wrap">
+    <h2>The trade you already made</h2>
+    <p>
+      Give your AI agent your cloud tokens and something remarkable happens. It provisions
+      infrastructure. It deploys. It reads the logs at three in the morning and fixes the thing
+      before you wake up. You have a DevOps team now, and it never sleeps.
+    </p>
+    <p>
+      But look at what you did to get there. Every token you own — AWS, Cloudflare, GitHub,
+      the database — <strong>now sits on one machine, readable by one process.</strong>
+    </p>
+    <figure>
+      <img src="media/one-machine.png" alt="Several keys converging onto a single laptop">
+      <figcaption>It doesn’t matter whether they’re in one file or ten. They’re in the same place.</figcaption>
+    </figure>
+    <p>That buys you two problems:</p>
     <ul>
-      <li><code>internal/vfs</code>: in-memory FS and FUSE/WebDAV mounting</li>
-      <li><code>internal/webrtc</code>: pion-based P2P connection + signaling integration</li>
-      <li><code>internal/sync</code>: commits manifest lines with hash/size/path only (no token body)</li>
-      <li><code>internal/daemon</code>: daemon lifecycle and local dev API</li>
-      <li><code>scripts/install.sh</code>: auto-download and install script for release binaries</li>
+      <li><strong>They are all in the same place.</strong> A single leak takes all of it — not one
+        credential, but your whole estate.</li>
+      <li><strong>You cannot un-give them.</strong> The agent keeps that access for as long as those
+        files sit on that disk, whether it is working or sitting idle at 4 a.m.</li>
     </ul>
+    <p class="muted">
+      Rotating keys afterwards is a cleanup, not a control. The window between “handed over” and
+      “rotated” is the part nobody measures.
+    </p>
+  </div>
+</section>
 
-    <h2>Install with curl + install.sh (Recommended)</h2>
-    <p>On Linux, install the latest release with this one-liner:</p>
+<section id="idea">
+  <div class="wrap">
+    <h2>The idea: a valet stand</h2>
+    <figure>
+      <img src="media/valet-stand.png" alt="A valet stand under a hotel canopy">
+    </figure>
+    <p>
+      You hand over your car. You do not hand over your life. The valet drives it, parks it, and
+      brings it back — and then the key returns to you. You gave up the <em>use</em> of the car
+      for twenty minutes. You never gave up the car.
+    </p>
+    <figure>
+      <img src="media/key-returns.png" alt="A key travelling back to its owner">
+      <figcaption>The part that matters is not the handover. It’s the return.</figcaption>
+    </figure>
+    <p>
+      ValetFS is that valet stand, for your secrets.
+    </p>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p>
+      Your secrets live in the app on your phone. On the machine where your agent runs, you start a
+      small daemon. When you allow it, the phone pushes the secrets to that daemon over an
+      end-to-end encrypted channel — and the daemon keeps them <strong>in memory only</strong>.
+    </p>
+    <figure>
+      <img src="media/memory-not-disk.png" alt="Secrets held in memory, with disk crossed out">
+    </figure>
+    <p>
+      The agent reads them through a local filesystem view — FUSE where it is available, a loopback
+      WebDAV endpoint and a CLI where it is not. Nothing the daemon serves is ever written to that
+      machine’s disk by the daemon itself.
+    </p>
+    <div class="note">
+      <strong>The vault paths carry an <code>fs:</code> prefix</strong> — <code>fs:/keys/github</code>
+      means “in the vault”, not “on this machine”. <code>ls</code> and <code>cat</code> reject a bare
+      path outright. <code>cp</code> and <code>mv</code> accept both and infer the direction, so leaving
+      the prefix off there will write plaintext to disk. That is the one footgun worth memorising.
+    </div>
+    <h3>Zero backend</h3>
+    <p>
+      There is no server holding your secrets. The signaling hub — a Cloudflare Worker with a Durable
+      Object — only relays ciphertext between your phone and your daemon so they can find each other.
+      It never sees plaintext, and it is not in the path once the session is up.
+    </p>
+  </div>
+</section>
+
+<section id="connect">
+  <div class="wrap">
+    <h2>Two ways to connect</h2>
+    <div class="cols">
+      <div class="card">
+        <h3>1 · Scan a QR code</h3>
+        <p>Run the daemon on your machine. It prints an ASCII QR code in the terminal:</p>
+        <pre><code>valetfs serve</code></pre>
+        <p>Open the app, tap <em>Pair a daemon</em>, and scan it. You’re connected.</p>
+      </div>
+      <div class="card">
+        <h3>2 · Let the agent do it</h3>
+        <p>
+          Or skip the terminal entirely. Tap <em>Provision an agent</em> and the app writes the
+          instructions for you. Paste them into Claude Code, Gemini, or Codex and your agent
+          downloads the daemon, installs it, and joins the session by itself.
+        </p>
+      </div>
+    </div>
+    <div class="shots">
+      <figure>
+        <img src="media/app-daemons.png" alt="ValetFS Daemons screen">
+        <figcaption>Two entry points</figcaption>
+      </figure>
+      <figure>
+        <img src="media/app-provision.png" alt="Provision agent screen with the generated prompt">
+        <figcaption>The prompt is written for you</figcaption>
+      </figure>
+      <figure>
+        <img src="media/app-session.png" alt="Session screen showing status and actions">
+        <figcaption>Session status and controls</figcaption>
+      </figure>
+    </div>
+    <p class="muted">
+      The connection key is a bearer capability for that session. Treat it like a secret invite and
+      share it only with an agent you trust, over a private channel.
+    </p>
+  </div>
+</section>
+
+<section id="return">
+  <div class="wrap">
+    <h2>Taking them back is automatic</h2>
+    <p>
+      You do not have to remember. Close the app and the daemon starts a countdown. When it runs
+      out, the vault unmounts and the memory is zero-wiped. The session screen tells you exactly
+      when that will happen — not just how long the window is.
+    </p>
+    <div class="shots">
+      <figure>
+        <img src="media/app-grace.png" alt="Grace window options: 5 minutes, 1 hour, 1 day, 7 days">
+        <figcaption>You choose the window</figcaption>
+      </figure>
+    </div>
+    <p>You can also end it immediately from the phone:</p>
+    <table>
+      <tr><th>Action</th><th>What happens</th></tr>
+      <tr><td><strong>Lock now</strong></td><td>Unmounts and zero-wipes memory right away</td></tr>
+      <tr><td><strong>Unmount</strong></td><td>Stops serving the filesystem, keeps the session</td></tr>
+      <tr><td><strong>Forget this daemon</strong></td><td>Drops the pairing entirely</td></tr>
+    </table>
+    <div class="note warn">
+      <strong>The wipe is the product, not a bug.</strong> If your secrets could outlive your
+      permission, none of the rest would mean anything. If files “disappeared”, the grace window
+      almost certainly expired — that is the system working.
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Get it</h2>
+    <h3>Phone — the vault</h3>
+    <p>
+      <a href="https://apps.apple.com/app/valetfs/id6804526734">ValetFS on the App Store</a>
+      — free, iPhone and iPad. Seven languages.
+    </p>
+    <h3>Machine — the daemon</h3>
+    <p>Linux x86_64 and arm64. No root, no drivers, no FUSE required:</p>
     <pre><code>curl -fsSL https://winm2m.github.io/valet-fs/install.sh | bash</code></pre>
-    <p>
-      The installer detects OS/architecture (<code>amd64</code>, <code>arm64</code>),
-      downloads the matching binary from GitHub Releases, and installs it to
-      <code>/usr/local/bin/valetfs</code> by default.
-    </p>
-
-    <h2>Optional Parameters</h2>
-    <ul>
-      <li>Install a specific version: set <code>VALETFS_VERSION=v0.1.0</code></li>
-      <li>Change install path: set <code>INSTALL_DIR=/custom/bin</code></li>
-    </ul>
-    <pre><code>curl -fsSL https://winm2m.github.io/valet-fs/install.sh | VALETFS_VERSION=v0.1.0 INSTALL_DIR=$HOME/.local/bin bash</code></pre>
-
-    <h2>AI agent skill (Claude Code)</h2>
-    <p>
-      If you hand a connection key to a skill-capable agent, install the ValetFS
-      skill on that machine as well. It makes the agent check your vault before
-      reading credentials from disk or environment variables &mdash; in every later
-      session, not just the one where you pasted the key.
-    </p>
+    <p>If your agent supports skills, install the ValetFS skill so it keeps checking the vault
+       before reading credentials off disk in later sessions too:</p>
     <pre><code>curl -fsSL https://winm2m.github.io/valet-fs/install-skill.sh | bash</code></pre>
     <p>
-      Installs to <code>~/.claude/skills/valetfs/</code>. Set <code>SKILL_DIR=</code>
-      to scope it to a single project instead.
+      On macOS, Windows, or an unsupported architecture, build from source:
+      <code>go build -o valetfs ./cmd/valetfs</code>.
+      Full details in the <a href="install.html">installation guide</a>.
     </p>
+    <h3>Reading secrets</h3>
+    <pre><code>valetfs ls -l fs:/keys        # what the app pushed
+valetfs cat fs:/keys/github   # read one
+valetfs status                # mount state, bytes used, grace countdown</code></pre>
+  </div>
+</section>
 
-    <h2>Quick Start After Install</h2>
-    <pre><code>valetfs serve --dev
-valetfs status</code></pre>
+<section id="open">
+  <div class="wrap">
+    <h2>Open source</h2>
     <p>
-      The daemon starts a local control API and WebDAV endpoint on loopback,
-      and keeps running even when FUSE mounting is unavailable.
+      The daemon, the CLI, and the signaling worker are open source under the MIT licence at
+      <a href="https://github.com/winm2m/valet-fs">github.com/winm2m/valet-fs</a>. You can read
+      exactly what touches your secrets, and build it yourself.
     </p>
-
-    <h2>Two-Device Pairing Test (Vault + Serve)</h2>
     <p>
-      You can validate the new vault-origin workflow with two machines: one runs
-      <code>serve</code> as remote daemon, the other runs <code>vault</code> as controller.
+      The iOS app is free. <strong>ValetFS Pro</strong> is a one-time purchase that adds iCloud
+      Keychain sync, so your vault follows you to a new device instead of living on one phone.
     </p>
+  </div>
+</section>
 
-    <p><strong>Device A (serve target)</strong></p>
-    <pre><code>valetfs serve</code></pre>
-    <p>
-      If <code>--signaling</code> is omitted, default signaling URL is
-      <code>https://valetfs-signaling.winm2m.workers.dev</code>.
-      Keep this process running and copy the printed <code>Session ID: ...</code> value.
-    </p>
+<footer>
+  <div class="wrap">
+    <a href="install.html">Installation guide</a>
+    <a href="https://github.com/winm2m/valet-fs">GitHub</a>
+    <a href="support.html">Support</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="https://winm2m.com">WinM2M</a>
+    <p style="margin-top:18px">Small, open-source developer tools from WinM2M.</p>
+  </div>
+</footer>
 
-    <p><strong>Device B (vault origin/controller)</strong></p>
-    <pre><code>export VALETFS_VAULT_PASSWORD='change-me'
-valetfs vault init
-valetfs vault add ./my-key.pem fs:/keys/my-key.pem
-valetfs vault pair &lt;SESSION_ID&gt;</code></pre>
-
-    <p>Optional follow-up commands:</p>
-    <pre><code>valetfs vault sync &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.winm2m.workers.dev
-valetfs vault status &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.winm2m.workers.dev
-valetfs vault unmount &lt;SESSION_ID&gt; --signaling https://valetfs-signaling.winm2m.workers.dev</code></pre>
-
-    <p>
-      If follow-up commands time out when reconnecting to the same session, create a
-      new serve session and pair again.
-    </p>
-
-    <h2>Verbose Mode for Pairing Diagnostics</h2>
-    <p>
-      If pairing fails with timeout, run both sides with verbose logs to inspect
-      signaling, claim, answer, and ICE candidate exchange.
-    </p>
-    <pre><code>valetfs serve -v
-valetfs vault -v pair &lt;SESSION_ID&gt;</code></pre>
-  </main>
-  <script>
-    (function () {
-      const icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
-      document.querySelectorAll('pre').forEach((pre) => {
-        const code = pre.querySelector('code');
-        if (!code) return;
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'copy-btn';
-        btn.innerHTML = icon;
-        btn.setAttribute('aria-label', 'Copy code');
-        btn.addEventListener('click', async () => {
-          try {
-            await navigator.clipboard.writeText(code.innerText);
-            btn.style.borderColor = '#0f766e';
-            setTimeout(() => { btn.style.borderColor = '#d6d0c4'; }, 700);
-          } catch (_) {
-            btn.style.borderColor = '#b91c1c';
-            setTimeout(() => { btn.style.borderColor = '#d6d0c4'; }, 700);
-          }
-        });
-        pre.appendChild(btn);
-      });
-    })();
-  </script>
 </body>
 </html>
