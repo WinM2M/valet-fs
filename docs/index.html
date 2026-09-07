@@ -9,6 +9,8 @@
 <meta property="og:description" content="Your secrets live on your phone. Your agent borrows them into memory, never onto disk, and only while you allow it.">
 <meta property="og:image" content="https://winm2m.github.io/valet-fs/media/icon.png">
 <meta property="og:type" content="website">
+<link rel="alternate" hreflang="en" href="https://winm2m.github.io/valet-fs/">
+<link rel="alternate" hreflang="ko" href="https://winm2m.github.io/valet-fs/ko.html">
 <link rel="icon" href="media/icon.png">
 <style>
   :root{
@@ -34,7 +36,7 @@
   .muted{color:var(--muted)}
 
   /* hero */
-  header{padding:70px 0 56px;background:
+  header{position:relative;padding:70px 0 56px;background:
     radial-gradient(900px 520px at 78% 0%, #13203c 0%, transparent 62%)}
   .hero{display:flex;gap:28px;align-items:center;flex-wrap:wrap}
   .hero img{width:108px;height:108px;border-radius:25px;box-shadow:0 18px 44px rgba(0,0,0,.5)}
@@ -81,6 +83,10 @@
   th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
   th{color:var(--muted);font-weight:600}
 
+  #lang{position:absolute;top:22px;right:24px;font-size:.9rem}
+  #lang a{color:var(--muted);text-decoration:none;padding:6px 12px;border:1px solid var(--line);border-radius:999px}
+  #lang a.on{color:#fff;border-color:var(--blue);background:rgba(25,118,210,.18)}
+  @media (max-width:720px){ #lang{position:static;padding:16px 22px 0} }
   footer{padding:46px 0 70px;border-top:1px solid var(--line);color:var(--muted);font-size:.93rem}
   footer a{margin-right:18px}
 </style>
@@ -88,6 +94,7 @@
 <body>
 
 <header>
+  <div id="lang"><a href="index.html" class="on">EN</a> <a href="ko.html">한국어</a></div>
   <div class="wrap hero">
     <img src="media/icon.png" alt="ValetFS app icon">
     <div>
@@ -318,6 +325,7 @@ valetfs status                # mount state, bytes used, grace countdown</code><
 
 <footer>
   <div class="wrap">
+    <a href="ko.html">한국어</a>
     <a href="install.html">Installation guide</a>
     <a href="https://github.com/winm2m/valet-fs">GitHub</a>
     <a href="support.html">Support</a>
