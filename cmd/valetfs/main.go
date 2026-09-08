@@ -30,6 +30,7 @@ import (
 	"github.com/anomalyco/valet-fs/internal/config"
 	"github.com/anomalyco/valet-fs/internal/daemon"
 	"github.com/anomalyco/valet-fs/internal/e2ee"
+	"github.com/anomalyco/valet-fs/internal/hardening"
 	"github.com/anomalyco/valet-fs/internal/node"
 	"github.com/anomalyco/valet-fs/internal/transport/ws"
 	"github.com/anomalyco/valet-fs/internal/vfs"
@@ -131,6 +132,20 @@ func serve(args []string) {
 		}
 	}
 
+	// Before any secret can exist in this process: keep its memory out of swap
+	// and out of core dumps, and refuse same-uid ptrace. Wiping the heap on lock
+	// only covers secrets that are already meant to be gone.
+	hr := hardening.Apply()
+	if hr.MemoryLocked && hr.DumpsDisabled {
+		log.Println("valetfs: memory locked; core dumps and same-uid ptrace disabled")
+	} else {
+		log.Printf("valetfs: process hardening incomplete (memory_locked=%t dumps_disabled=%t)",
+			hr.MemoryLocked, hr.DumpsDisabled)
+	}
+	for _, note := range hr.Notes {
+		log.Printf("valetfs: %s", note)
+	}
+
 	// Phase 3 rule 1: idempotent ghost-unmount before we touch the mountpoint.
 	vfs.PreUnmount(cfg.MountPoint)
 
@@ -164,6 +179,9 @@ func serve(args []string) {
 		log.Println("valetd: starting in DEV mode (no WebRTC)")
 	} else if cfg.Transport == "ws" {
 		log.Println("valetd: starting in PRODUCTION mode (ws transport)")
+		// Applies to the signaling URL from config and to the one carried inside
+		// a --join key, which is supplied by whoever wrote that key.
+		ws.SetAllowInsecure(cfg.InsecureSignaling)
 		var kp *e2ee.KeyPair
 		var err error
 		if cfg.ResumeKeyFile != "" {

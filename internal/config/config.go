@@ -72,6 +72,11 @@ type Config struct {
 	// JoinKey, when set, joins an app-provisioned session (reverse flow) as the
 	// daemon instead of creating a new session. Implies ws transport.
 	JoinKey string
+
+	// InsecureSignaling permits a plaintext (http/ws) hub on a non-loopback
+	// host. The session token travels in the connect URL, so this hands the
+	// session to anyone on the path; it must be asked for explicitly.
+	InsecureSignaling bool
 }
 
 // Load parses CLI flags and merges environment variables (.env supported).
@@ -96,6 +101,7 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&cfg.Transport, "transport", defaultEnv("VALETFS_TRANSPORT", "ws"), "Control-plane transport: ws (default)|webrtc")
 	fs.StringVar(&cfg.JoinKey, "join", defaultEnv("VALETFS_JOIN", ""), "Join an app-provisioned session with a connection key (reverse flow)")
 	fs.IntVar(&cfg.GraceSeconds, "grace", defaultEnvInt("VALETFS_GRACE", 300), "Seconds to keep VFS mounted after vault goes offline (ws transport; 0 = immediate)")
+	fs.BoolVar(&cfg.InsecureSignaling, "insecure-signaling", defaultEnvBool("VALETFS_INSECURE_SIGNALING", false), "Allow a plaintext hub on a non-loopback host (the session token travels in the clear)")
 	fs.StringVar(&cfg.ResumeKeyFile, "resume-key-file", defaultEnv("VALETFS_RESUME_KEY_FILE", ""), "Persist the daemon X25519 key here so a restart rejoins the same session (starts locked; off by default)")
 
 	var quotaMB int64

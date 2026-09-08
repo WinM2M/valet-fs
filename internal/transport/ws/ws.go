@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,6 +18,45 @@ import (
 
 	"golang.org/x/net/websocket"
 )
+
+// allowInsecure permits a plaintext hub on a non-loopback host. Off by default.
+var allowInsecure bool
+
+// SetAllowInsecure opts in to talking to a hub over plain HTTP. Only a
+// deliberate choice should turn this on; see checkHubURL for what it costs.
+func SetAllowInsecure(v bool) { allowInsecure = v }
+
+// checkHubURL refuses a hub address that would put the session token on the
+// wire in the clear. The token is carried in the /ws/connect query string, and
+// whoever reads it can join the session as that role — as the vault, that means
+// reading the entire vault with MANIFEST and PULL.
+//
+// Loopback is exempt: `valetfs hub` and the tests run there, and there is no
+// network to eavesdrop on.
+func checkHubURL(hubURL string) error {
+	u, err := url.Parse(hubURL)
+	if err != nil {
+		return fmt.Errorf("hub url %q: %w", hubURL, err)
+	}
+	switch u.Scheme {
+	case "https", "wss":
+		return nil
+	case "http", "ws":
+	default:
+		return fmt.Errorf("hub url %q: unsupported scheme %q", hubURL, u.Scheme)
+	}
+	if host := u.Hostname(); host == "localhost" {
+		return nil
+	} else if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	if allowInsecure {
+		return nil
+	}
+	return fmt.Errorf("refusing to reach hub %s over plain HTTP: the session token "+
+		"travels in the URL, and anyone who reads it can join as the vault and pull "+
+		"every secret (use https, or pass --insecure-signaling to accept the risk)", hubURL)
+}
 
 // Conn adapts a websocket.Conn to the transport.Conn interface.
 type Conn struct {
@@ -118,6 +158,9 @@ func (c *Conn) readLoop() {
 // daemonPubB64 (may be empty) is the X25519 public key published for E2EE.
 // It returns the connection (not yet started), the session id, and the token.
 func DialDaemon(hubURL, daemonPubB64 string) (*Conn, string, error) {
+	if err := checkHubURL(hubURL); err != nil {
+		return nil, "", err
+	}
 	var resp struct {
 		SessionID   string `json:"session_id"`
 		DaemonToken string `json:"daemon_token"`
@@ -147,6 +190,9 @@ func (c *Conn) Token() string { return c.token }
 // allocating a new one. It fails if the session no longer exists on the hub
 // (e.g. the vault deleted it), which the caller uses to trigger a self-lock.
 func ReconnectDaemon(hubURL, sessionID, token string) (*Conn, error) {
+	if err := checkHubURL(hubURL); err != nil {
+		return nil, err
+	}
 	c, err := dialWS(hubURL, sessionID, "daemon", token)
 	if err != nil {
 		return nil, err
@@ -165,6 +211,9 @@ func JoinDaemon(hubURL, sessionID, token string) (*Conn, error) {
 // authenticated by the daemon token. Used by the reverse (join) flow, where the
 // pub was not set at create time.
 func PublishPub(hubURL, sessionID, token, pubB64 string) error {
+	if err := checkHubURL(hubURL); err != nil {
+		return err
+	}
 	body, _ := json.Marshal(map[string]any{"pub": pubB64})
 	req, err := http.NewRequest(
 		http.MethodPost,
@@ -191,6 +240,9 @@ func PublishPub(hubURL, sessionID, token, pubB64 string) error {
 // It also returns the daemon's published X25519 public key (base64; may be
 // empty if the daemon did not enable E2EE).
 func DialController(hubURL, sessionID string) (*Conn, string, error) {
+	if err := checkHubURL(hubURL); err != nil {
+		return nil, "", err
+	}
 	var resp struct {
 		ControllerToken string `json:"controller_token"`
 		DaemonPub       string `json:"daemon_pub"`
