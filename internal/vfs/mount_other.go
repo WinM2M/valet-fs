@@ -8,7 +8,7 @@ import "errors"
 type stubMounter struct{}
 
 // NewMounter returns a stub Mounter on unsupported platforms.
-func NewMounter(_ *MemFS) Mounter { return &stubMounter{} }
+func NewMounter(_ *MemFS, _ string, _ bool) Mounter { return &stubMounter{} }
 
 // PreUnmount is a no-op on unsupported platforms.
 func PreUnmount(_ string) {}

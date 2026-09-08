@@ -37,6 +37,11 @@ type Config struct {
 	// WebdavDisabled disables the WebDAV server when true.
 	WebdavDisabled bool
 
+	// WebdavAllowRemote permits binding the WebDAV server to a non-loopback
+	// address. Off by default: the server serves every secret in the vault, so
+	// exposing it to the network must be a deliberate act.
+	WebdavAllowRemote bool
+
 	// SignalingURL is the Cloudflare Worker signaling endpoint for production mode.
 	SignalingURL string
 
@@ -84,6 +89,7 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&cfg.RuntimeDir, "runtime-dir", defaultEnv("VALETFS_RUNTIME_DIR", defaultRuntimeDir()), "Runtime state directory")
 	fs.StringVar(&cfg.WebdavAddr, "webdav-addr", defaultEnv("VALETFS_WEBDAV_ADDR", "127.0.0.1:0"), "WebDAV listen address")
 	fs.BoolVar(&cfg.WebdavDisabled, "webdav-disabled", defaultEnvBool("VALETFS_WEBDAV_DISABLED", false), "Disable WebDAV server")
+	fs.BoolVar(&cfg.WebdavAllowRemote, "webdav-allow-remote", defaultEnvBool("VALETFS_WEBDAV_ALLOW_REMOTE", false), "Allow binding WebDAV to a non-loopback address (exposes every secret to the network)")
 	fs.StringVar(&cfg.SignalingURL, "signaling", defaultEnv("VALETFS_SIGNALING", "https://valetfs-signaling.winm2m.workers.dev"), "Cloudflare Worker signaling URL")
 	fs.StringVar(&cfg.GitTempDir, "git-dir", defaultEnv("VALETFS_GIT_DIR", defaultGitDir()), "Ephemeral go-git diff directory")
 

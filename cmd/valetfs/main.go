@@ -893,15 +893,15 @@ func fsPathExists(client *http.Client, base, token, p string) bool {
 func apiReq(client *http.Client, base, token, method, path string, q url.Values, body io.Reader) (*http.Response, error) {
 	u := base + path
 	if q != nil {
-		q.Set("token", token)
 		u += "?" + q.Encode()
-	} else {
-		u += "?token=" + url.QueryEscape(token)
 	}
 	req, err := http.NewRequest(method, u, body)
 	if err != nil {
 		return nil, err
 	}
+	// Header, not query string: URLs leak into proxy logs, shell history and
+	// process listings in a way headers do not.
+	req.Header.Set("X-Valet-Token", token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
