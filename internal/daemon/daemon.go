@@ -191,6 +191,11 @@ func (d *Daemon) Unmount() error {
 	return nil
 }
 
+// WipeHistory clears the on-disk change history. Locking wipes the heap; the
+// history of what was in it has to go at the same time, or "locked" means the
+// secrets are gone but the record of them is not.
+func (d *Daemon) WipeHistory() error { return d.repo.Wipe() }
+
 // Sync commits a manifest of the current VFS state to the diff repo.
 func (d *Daemon) Sync() (string, error) {
 	snap := d.fs.Snapshot()

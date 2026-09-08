@@ -224,6 +224,7 @@ func serve(args []string) {
 				log.Println("valetd: auto-lock (grace expired / remote lock); unmounting + wiping")
 				_ = d.Unmount()
 				d.MemFS().Wipe()
+				_ = d.WipeHistory()
 			},
 			Mounted: d.Mounted,
 			// UNMOUNT stops serving but keeps the heap; Remount re-serves on the
@@ -269,6 +270,7 @@ func serve(args []string) {
 			log.Println("valetd: control plane lost (session gone); self-locking (unmount + wipe)")
 			_ = d.Unmount()
 			d.MemFS().Wipe()
+			_ = d.WipeHistory()
 		}
 		attach = func(raw *ws.Conn) {
 			ec := e2ee.WrapDaemon(raw, kp)
@@ -305,6 +307,7 @@ func serve(args []string) {
 						log.Printf("valetd: unmount error from remote rpc: %v", err)
 					}
 					d.MemFS().Wipe()
+					_ = d.WipeHistory()
 				case "WRITE":
 					p, _ := rpc.Params["path"].(string)
 					content, _ := rpc.Params["content"].(string)
@@ -346,6 +349,7 @@ func serve(args []string) {
 					log.Printf("valetd: unmount error from remote command: %v", err)
 				}
 				d.MemFS().Wipe()
+				_ = d.WipeHistory()
 			case "WRITE":
 				p, _ := c.Payload["path"].(string)
 				content, _ := c.Payload["content"].(string)
