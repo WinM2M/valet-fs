@@ -34,3 +34,4 @@ go.work.sum
 # .vscode/
 tmp/*.md
 signaling/.wrangler/
+signaling/node_modules/

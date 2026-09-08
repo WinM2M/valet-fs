@@ -79,6 +79,19 @@ function randomID(): string {
   return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// tokenEqual compares two secrets without leaking their contents through
+// timing. Written in plain JS rather than crypto.subtle.timingSafeEqual, which
+// is a Cloudflare-only extension: a security check that cannot run outside the
+// Workers runtime cannot be unit tested, and would throw at request time if the
+// runtime ever dropped it. Length is compared up front because timing-safe
+// comparison needs equal lengths and token length is not secret.
+export function tokenEqual(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 function randomToken(): string {
   const buf = new Uint8Array(24);
   crypto.getRandomValues(buf);
@@ -238,11 +251,22 @@ export default {
       }
       // DELETE /ws/sessions/:id  -> tear down the session (frees DO storage +
       // closes any open sockets). Used by the app's "Forget daemon".
+      //
+      // Requires X-Valet-Role-Token. Deleting a session makes the daemon
+      // self-lock (unmount + wipe) once its reconnect window expires, so an
+      // unauthenticated delete is a remote wipe of somebody else's secrets by
+      // anyone who learns the session id. The header must be forwarded to the
+      // DO explicitly; stub.fetch with a bare URL drops it.
       if (req.method === "DELETE" && parts.length === 3 && parts[1] === "sessions") {
         const sid = parts[2];
         await audit(req, "ws.sessions.delete", sid);
         const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
-        return stub.fetch("https://do/?do=delete", { method: "POST" });
+        const fwd = new URL("https://do/");
+        fwd.searchParams.set("do", "delete");
+        return stub.fetch(new Request(fwd.toString(), {
+          method: "POST",
+          headers: { "X-Valet-Role-Token": req.headers.get("X-Valet-Role-Token") || "" },
+        }));
       }
       return new Response("not found", { status: 404 });
     }
@@ -484,6 +508,17 @@ export class SessionHub {
     }
 
     if (action === "delete") {
+      const hdr = req.headers.get("X-Valet-Role-Token") || "";
+      const dTok = (await this.state.storage.get<string>("daemon_token")) || "";
+      const vTok = (await this.state.storage.get<string>("vault_token")) || "";
+      if (!dTok && !vTok) {
+        // Nothing was ever provisioned here, so there is nothing to protect and
+        // nothing to tear down. Stay idempotent for the app's "forget" flow.
+        return new Response(null, { status: 204 });
+      }
+      if (!tokenEqual(hdr, dTok) && !tokenEqual(hdr, vTok)) {
+        return new Response("forbidden", { status: 403 });
+      }
       // Close any live sockets and wipe all session storage, releasing the
       // Durable Object's resources.
       for (const ws of this.state.getWebSockets()) {
