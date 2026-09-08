@@ -115,4 +115,50 @@ await test("tokenEqual rejects mismatched and empty inputs", () => {
   assert.ok(!tokenEqual("", ""));
 });
 
+
+// --- presence forgery -----------------------------------------------------
+
+import { isSystemFrame } from "./worker.ts";
+
+await test("forged presence frames are never relayed", async () => {
+  const forged = [
+    '{"sys":"peer_offline","role":"vault"}',
+    '{"sys":"peer_online","role":"vault"}',
+    '{"sys":"ka"}',
+    '{"role":"vault","sys":"peer_offline"}',   // key order is the sender's choice
+    '{"pad":"aaaaaaaaaaaaaaaa","sys":"peer_offline"}', // padding buys nothing
+    '{"sys":null}',
+  ];
+  for (const f of forged) {
+    assert.ok(isSystemFrame(f), `relayed a forged frame: ${f}`);
+    assert.ok(isSystemFrame(new TextEncoder().encode(f).buffer),
+      `relayed a forged binary frame: ${f}`);
+  }
+
+  const app = [
+    '{"v":1,"type":"REQ","method":"STATUS"}',
+    '{"enc":"YmFzZTY0"}',
+    '{"kx":"hello","pub":"AAAA"}',
+    "not json at all",
+    "",
+  ];
+  for (const f of app) {
+    assert.ok(!isSystemFrame(f), `dropped a legitimate frame: ${f}`);
+  }
+});
+
+await test("the relay drops a peer's presence but passes app frames", async () => {
+  const st = fakeState();
+  const delivered = [];
+  st.getWebSockets = (role) => (role === "vault" ? [{ send: (m) => delivered.push(m) }] : []);
+  st.getTags = () => ["daemon"];
+  const hub = new SessionHub(st);
+
+  await hub.webSocketMessage({}, '{"sys":"peer_offline","role":"vault"}');
+  assert.strictEqual(delivered.length, 0, "a forged presence frame reached the peer");
+
+  await hub.webSocketMessage({}, '{"enc":"YmFzZTY0"}');
+  assert.strictEqual(delivered.length, 1, "a legitimate app frame was dropped");
+});
+
 console.log(`\nSessionHub: ${passed}/${passed} 통과`);

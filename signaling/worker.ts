@@ -446,6 +446,38 @@ function otherRole(role: string): string {
   return role === "daemon" ? "vault" : "daemon";
 }
 
+/**
+ * True if a frame a peer sent claims to be a presence/system frame.
+ *
+ * Presence drives the daemon's grace timer: peer_offline starts the countdown
+ * that unmounts and wipes, peer_online cancels it. The hub emits those itself,
+ * but the relay used to forward frames verbatim, so either peer could forge
+ * them — sending peer_offline to destroy the other side's secrets, or a steady
+ * drip of peer_online to stop a daemon ever auto-locking. Peers do not get to
+ * speak the hub's language.
+ *
+ * Everything is parsed rather than prefix-matched, because the sender chooses
+ * the key order and any cheaper check is one the forger simply routes around.
+ */
+export function isSystemFrame(message: string | ArrayBuffer): boolean {
+  let text: string;
+  if (typeof message === "string") {
+    text = message;
+  } else {
+    try {
+      text = new TextDecoder().decode(message);
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return !!parsed && typeof parsed === "object" && "sys" in parsed;
+  } catch {
+    return false; // not JSON: opaque app payload, relay it
+  }
+}
+
 export class SessionHub {
   state: DurableObjectState;
 
@@ -577,8 +609,9 @@ export class SessionHub {
     return new Response("not found", { status: 404 });
   }
 
-  // Relay every frame to the other role verbatim.
+  // Relay every frame to the other role, except the ones only the hub may send.
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (isSystemFrame(message)) return;
     const tags = this.state.getTags(ws);
     const role = tags[0] || "";
     for (const p of this.state.getWebSockets(otherRole(role))) {

@@ -170,11 +170,15 @@ func (s *Server) handleWS(ws *websocket.Conn) {
 		}
 	}()
 
-	// Relay loop: forward every frame verbatim to the other role.
+	// Relay loop: forward frames to the other role, minus the ones only the hub
+	// may send. See isSystemFrame.
 	for {
 		var data []byte
 		if err := websocket.Message.Receive(ws, &data); err != nil {
 			return
+		}
+		if isSystemFrame(data) {
+			continue
 		}
 		sess.mu.Lock()
 		peer := sess.conns[sess.other(role)]
@@ -183,6 +187,23 @@ func (s *Server) handleWS(ws *websocket.Conn) {
 			_ = websocket.Message.Send(peer, data)
 		}
 	}
+}
+
+// isSystemFrame reports whether a frame a peer sent claims to be a presence or
+// system frame. Presence drives the daemon's grace timer — peer_offline starts
+// the countdown that unmounts and wipes, peer_online cancels it — so relaying a
+// peer's own presence frames would let either side destroy the other's secrets
+// or keep a daemon unlocked forever. Only the hub speaks presence.
+// The rule is "carries a sys key at all", not "carries a sys string". Anything
+// looser invites a bypass hunt, and the Cloudflare hub applies the same rule, so
+// the two implementations cannot drift into disagreeing about a frame.
+func isSystemFrame(data []byte) bool {
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(data, &probe) != nil {
+		return false // not JSON, or not an object: opaque app payload, relay it
+	}
+	_, ok := probe["sys"]
+	return ok
 }
 
 func sendPresence(ws *websocket.Conn, sys, role string) {
