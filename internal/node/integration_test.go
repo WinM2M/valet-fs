@@ -55,7 +55,7 @@ func startDaemon(t *testing.T, hubURL string, grace time.Duration) *daemonHarnes
 
 func connectVault(t *testing.T, hubURL, sid string) (*ws.Conn, *rpc.Client) {
 	t.Helper()
-	conn, _, err := ws.DialController(hubURL, sid)
+	conn, _, _, err := ws.DialController(hubURL, sid)
 	if err != nil {
 		t.Fatalf("vault dial: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestE2EEEncryptedRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = dConn.Close() })
 
 	// Vault side with E2EE (daemon pub authenticated via claim/QR).
-	rawV, daemonPub, err := ws.DialController(hubURL, sid)
+	rawV, daemonPub, _, err := ws.DialController(hubURL, sid)
 	if err != nil {
 		t.Fatalf("vault dial: %v", err)
 	}

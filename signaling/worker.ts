@@ -201,13 +201,13 @@ export default {
       // POST /ws/sessions  {role:"daemon"} -> {session_id, daemon_token}
       if (req.method === "POST" && parts.length === 2 && parts[1] === "sessions") {
         await audit(req, "ws.sessions.create");
-        const body = (await req.json().catch(() => ({}))) as { role?: string; pub?: string };
+        const body = (await req.json().catch(() => ({}))) as { role?: string; pub?: string; versions?: number[] };
         if (body.role !== "daemon") return json({ error: "role must be daemon" }, 400);
         const sid = randomID();
         const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
         const r = await stub.fetch("https://do/?do=create", {
           method: "POST",
-          body: JSON.stringify({ pub: body.pub || "" }),
+          body: JSON.stringify({ pub: body.pub || "", versions: body.versions ?? [] }),
         });
         const { daemon_token } = (await r.json()) as { daemon_token: string };
         return json({ session_id: sid, daemon_token });
@@ -492,14 +492,17 @@ export class SessionHub {
     if (action === "create") {
       const token = randomToken();
       let pub = "";
+      let versions: number[] = [];
       try {
-        const b = (await req.json()) as { pub?: string };
+        const b = (await req.json()) as { pub?: string; versions?: number[] };
         pub = b.pub || "";
+        versions = Array.isArray(b.versions) ? b.versions : [];
       } catch {
         // no body
       }
       await this.state.storage.put("daemon_token", token);
       if (pub) await this.state.storage.put("daemon_pub", pub);
+      if (versions.length) await this.state.storage.put("versions", versions);
       return new Response(JSON.stringify({ daemon_token: token }), {
         headers: { "content-type": "application/json" },
       });
@@ -510,12 +513,18 @@ export class SessionHub {
       const hdr = req.headers.get("X-Valet-Role-Token") || "";
       if (!token || hdr !== token) return new Response("forbidden", { status: 403 });
       let pub = "";
+      let versions: number[] = [];
       try {
-        const b = (await req.json()) as { pub?: string };
+        const b = (await req.json()) as { pub?: string; versions?: number[] };
         pub = b.pub || "";
+        versions = Array.isArray(b.versions) ? b.versions : [];
       } catch {
         // no body
       }
+      // Relayed verbatim and never interpreted here. Clients treat this list as
+      // an unauthenticated hint and re-check it against what the daemon reports
+      // inside the encrypted channel, precisely because this hub could edit it.
+      if (versions.length) await this.state.storage.put("versions", versions);
       if (pub) {
         // First-writer-wins: the pubkey is immutable once set, so a party that
         // later obtains the token cannot swap the E2EE key mid-session.
@@ -571,7 +580,8 @@ export class SessionHub {
         await this.state.storage.put("vault_token", token);
       }
       const pub = (await this.state.storage.get<string>("daemon_pub")) || "";
-      return new Response(JSON.stringify({ controller_token: token, daemon_pub: pub }), {
+      const versions = (await this.state.storage.get<number[]>("versions")) || [];
+      return new Response(JSON.stringify({ controller_token: token, daemon_pub: pub, versions }), {
         headers: { "content-type": "application/json" },
       });
     }

@@ -27,9 +27,9 @@ function fakeState() {
 
 const url = (action) => `https://do/?do=${action}`;
 
-async function create(hub, pub = "PUB") {
+async function create(hub, pub = "PUB", versions = [1]) {
   const r = await hub.fetch(new Request(url("create"), {
-    method: "POST", body: JSON.stringify({ pub }),
+    method: "POST", body: JSON.stringify({ pub, versions }),
   }));
   return (await r.json()).daemon_token;
 }
@@ -159,6 +159,36 @@ await test("the relay drops a peer's presence but passes app frames", async () =
 
   await hub.webSocketMessage({}, '{"enc":"YmFzZTY0"}');
   assert.strictEqual(delivered.length, 1, "a legitimate app frame was dropped");
+});
+
+// --- protocol versions ----------------------------------------------------
+
+await test("claim relays the daemon's version list verbatim", async () => {
+  const hub = new SessionHub(fakeState());
+  await create(hub, "PUB", [1, 2]);
+  const claim = await (await hub.fetch(new Request(url("claim"), { method: "POST" }))).json();
+  assert.deepStrictEqual(claim.versions, [1, 2]);
+});
+
+await test("a session with no version list claims cleanly", async () => {
+  const hub = new SessionHub(fakeState());
+  await create(hub, "PUB", []);
+  const claim = await (await hub.fetch(new Request(url("claim"), { method: "POST" }))).json();
+  assert.deepStrictEqual(claim.versions, []);
+});
+
+await test("setpub can carry versions for a joining daemon", async () => {
+  const hub = new SessionHub(fakeState());
+  const tok = await create(hub, "", []);
+  const r = await hub.fetch(new Request(url("setpub"), {
+    method: "POST",
+    headers: { "X-Valet-Role-Token": tok },
+    body: JSON.stringify({ pub: "JOINED", versions: [1] }),
+  }));
+  assert.strictEqual(r.status, 204);
+  const claim = await (await hub.fetch(new Request(url("claim"), { method: "POST" }))).json();
+  assert.strictEqual(claim.daemon_pub, "JOINED");
+  assert.deepStrictEqual(claim.versions, [1]);
 });
 
 console.log(`\nSessionHub: ${passed}/${passed} 통과`);

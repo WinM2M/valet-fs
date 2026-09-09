@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/net/websocket"
+
+	"github.com/anomalyco/valet-fs/internal/rpc"
 )
 
 // allowInsecure permits a plaintext hub on a non-loopback host. Off by default.
@@ -165,7 +167,7 @@ func DialDaemon(hubURL, daemonPubB64 string) (*Conn, string, error) {
 		SessionID   string `json:"session_id"`
 		DaemonToken string `json:"daemon_token"`
 	}
-	body := map[string]any{"role": "daemon", "init": true}
+	body := map[string]any{"role": "daemon", "init": true, "versions": rpc.Supported}
 	if daemonPubB64 != "" {
 		body["pub"] = daemonPubB64
 	}
@@ -214,7 +216,11 @@ func PublishPub(hubURL, sessionID, token, pubB64 string) error {
 	if err := checkHubURL(hubURL); err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]any{"pub": pubB64})
+	// The version list travels with the pubkey so a client learns what this
+	// daemon speaks before it opens a socket. It is hub-supplied and therefore
+	// not trusted; the daemon repeats it over the encrypted channel in STATUS
+	// so a client can catch a hub that edited it.
+	body, _ := json.Marshal(map[string]any{"pub": pubB64, "versions": rpc.Supported})
 	req, err := http.NewRequest(
 		http.MethodPost,
 		fmt.Sprintf("%s/ws/sessions/%s/pub", hubURL, sessionID),
@@ -236,25 +242,27 @@ func PublishPub(hubURL, sessionID, token, pubB64 string) error {
 	return nil
 }
 
-// DialController claims an existing session and connects as the vault role.
-// It also returns the daemon's published X25519 public key (base64; may be
-// empty if the daemon did not enable E2EE).
-func DialController(hubURL, sessionID string) (*Conn, string, error) {
+// DialController claims an existing session and connects as the vault role. It
+// also returns the daemon's published X25519 public key (base64; may be empty
+// if the daemon did not enable E2EE) and the protocol versions the hub says the
+// daemon supports. Both come from the hub and neither is trusted on its own.
+func DialController(hubURL, sessionID string) (*Conn, string, []int, error) {
 	if err := checkHubURL(hubURL); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	var resp struct {
 		ControllerToken string `json:"controller_token"`
 		DaemonPub       string `json:"daemon_pub"`
+		Versions        []int  `json:"versions"`
 	}
 	if err := postJSON(fmt.Sprintf("%s/ws/sessions/%s/claim", hubURL, sessionID), nil, &resp); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	c, err := dialWS(hubURL, sessionID, "vault", resp.ControllerToken)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	return c, resp.DaemonPub, nil
+	return c, resp.DaemonPub, resp.Versions, nil
 }
 
 func dialWS(hubURL, sid, role, token string) (*Conn, error) {

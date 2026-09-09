@@ -273,6 +273,11 @@ func (n *MemoryNode) register() {
 			"version":       fs.Version(),
 			"grace_seconds": int64(graceCfg / time.Second),
 			"grace_armed":   graceArmed,
+			// Repeated here on purpose. The client also learns this list from
+			// the hub's claim response, which the hub could have edited to push
+			// the session onto an older protocol. This copy arrives over the
+			// encrypted channel, so the two disagreeing means the hub lied.
+			"protocol_versions": rpc.Supported,
 		}
 		if graceArmed {
 			res["grace_remaining_seconds"] = int64(graceLeft / time.Second)
