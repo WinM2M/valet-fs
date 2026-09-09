@@ -92,6 +92,22 @@ export function tokenEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/**
+ * SHA-256 hex. The hub stores only the hash of a claim secret, so a dump of its
+ * storage does not hand anyone the ability to claim a session.
+ */
+async function sha256Hex(input: string): Promise<string> {
+  const dig = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(dig), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * How long a session may sit unclaimed. The session id is printed to a terminal
+ * and travels through logs and transcripts, so leaving an unclaimed session
+ * valid forever means one stray screenshot stays useful indefinitely.
+ */
+const UNCLAIMED_TTL_MS = 30 * 60 * 1000;
+
 function randomToken(): string {
   const buf = new Uint8Array(24);
   crypto.getRandomValues(buf);
@@ -188,7 +204,7 @@ export default {
         headers: {
           "access-control-allow-origin": "*",
           "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
-          "access-control-allow-headers": "content-type,x-valet-role-token",
+          "access-control-allow-headers": "content-type,x-valet-role-token,x-valet-claim-secret",
         },
       });
     }
@@ -201,13 +217,19 @@ export default {
       // POST /ws/sessions  {role:"daemon"} -> {session_id, daemon_token}
       if (req.method === "POST" && parts.length === 2 && parts[1] === "sessions") {
         await audit(req, "ws.sessions.create");
-        const body = (await req.json().catch(() => ({}))) as { role?: string; pub?: string; versions?: number[] };
+        const body = (await req.json().catch(() => ({}))) as {
+          role?: string; pub?: string; versions?: number[]; claim_secret?: string;
+        };
         if (body.role !== "daemon") return json({ error: "role must be daemon" }, 400);
         const sid = randomID();
         const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
         const r = await stub.fetch("https://do/?do=create", {
           method: "POST",
-          body: JSON.stringify({ pub: body.pub || "", versions: body.versions ?? [] }),
+          body: JSON.stringify({
+            pub: body.pub || "",
+            versions: body.versions ?? [],
+            claim_secret: body.claim_secret || "",
+          }),
         });
         const { daemon_token } = (await r.json()) as { daemon_token: string };
         return json({ session_id: sid, daemon_token });
@@ -217,7 +239,14 @@ export default {
         const sid = parts[2];
         await audit(req, "ws.sessions.claim", sid);
         const stub = env.SESSION_HUB.get(env.SESSION_HUB.idFromName(sid));
-        const r = await stub.fetch("https://do/?do=claim", { method: "POST" });
+        // The secret travels in a header, not the query string: URLs are the
+        // one part of a request that reliably ends up in somebody's log.
+        const fwd = new URL("https://do/");
+        fwd.searchParams.set("do", "claim");
+        const r = await stub.fetch(new Request(fwd.toString(), {
+          method: "POST",
+          headers: { "X-Valet-Claim-Secret": req.headers.get("X-Valet-Claim-Secret") || "" },
+        }));
         return new Response(r.body, { status: r.status, headers: { "content-type": "application/json" } });
       }
       // GET /ws/connect?sid=&role=&token=  -> websocket upgrade (routed to DO)
@@ -493,16 +522,30 @@ export class SessionHub {
       const token = randomToken();
       let pub = "";
       let versions: number[] = [];
+      let claimSecret = "";
+      // Server clock, deliberately. A caller-supplied timestamp would let the
+      // holder of a stale session id claim it was created a moment ago and walk
+      // straight past the expiry.
+      const createdAt = Date.now();
       try {
-        const b = (await req.json()) as { pub?: string; versions?: number[] };
+        const b = (await req.json()) as {
+          pub?: string; versions?: number[]; claim_secret?: string;
+        };
         pub = b.pub || "";
         versions = Array.isArray(b.versions) ? b.versions : [];
+        claimSecret = b.claim_secret || "";
       } catch {
         // no body
       }
       await this.state.storage.put("daemon_token", token);
+      await this.state.storage.put("created_at", createdAt);
       if (pub) await this.state.storage.put("daemon_pub", pub);
       if (versions.length) await this.state.storage.put("versions", versions);
+      // Only the hash. The secret itself exists in the QR or the connection key
+      // and nowhere on this server.
+      if (claimSecret) {
+        await this.state.storage.put("claim_hash", await sha256Hex(claimSecret));
+      }
       return new Response(JSON.stringify({ daemon_token: token }), {
         headers: { "content-type": "application/json" },
       });
@@ -574,16 +617,48 @@ export class SessionHub {
     }
 
     if (action === "claim") {
-      let token = (await this.state.storage.get<string>("vault_token")) || "";
+      // The session id used to be the whole credential: anyone who learned it
+      // could claim, connect as the vault, and read the entire vault with
+      // MANIFEST and PULL. It is printed to a terminal and ends up in logs,
+      // screenshots and agent transcripts, so it is an identifier, not a secret.
+      //
+      // The claim secret is the credential now. It travels only out of band —
+      // inside the QR, or inside the connection key the user carries — which is
+      // what finally makes "I scanned this screen" mean something to the daemon
+      // rather than only to the person holding the phone.
+      const claimHash = await this.state.storage.get<string>("claim_hash");
+      const offered = req.headers.get("X-Valet-Claim-Secret") || "";
+      if (claimHash) {
+        if (!offered || !tokenEqual(await sha256Hex(offered), claimHash)) {
+          return new Response("forbidden", { status: 403 });
+        }
+      }
+
+      const now = Date.now();
+      const createdAt = (await this.state.storage.get<number>("created_at")) || 0;
+      const existing = await this.state.storage.get<string>("vault_token");
+      if (!existing && claimHash && createdAt && now - createdAt > UNCLAIMED_TTL_MS) {
+        return new Response("session expired", { status: 410 });
+      }
+
+      let token = existing || "";
       if (!token) {
         token = randomToken();
         await this.state.storage.put("vault_token", token);
+        // One shot. A second holder of the secret — someone who photographed
+        // the screen — gets nothing, and the first claimant is told a claim
+        // already happened so a stolen scan does not pass unnoticed.
+        await this.state.storage.put("claimed_at", now);
       }
       const pub = (await this.state.storage.get<string>("daemon_pub")) || "";
       const versions = (await this.state.storage.get<number[]>("versions")) || [];
-      return new Response(JSON.stringify({ controller_token: token, daemon_pub: pub, versions }), {
-        headers: { "content-type": "application/json" },
-      });
+      const claimedAt = (await this.state.storage.get<number>("claimed_at")) || 0;
+      return new Response(JSON.stringify({
+        controller_token: token, daemon_pub: pub, versions,
+        // Surfaces "somebody already claimed this" to whoever asks second.
+        first_claim: existing ? false : true,
+        claimed_at: claimedAt,
+      }), { headers: { "content-type": "application/json" } });
     }
 
     if (action === "connect") {
@@ -597,6 +672,11 @@ export class SessionHub {
       );
       if (!want || token !== want) {
         return new Response("forbidden", { status: 403 });
+      }
+      // One socket per role. Without this a second claimant could sit alongside
+      // the real vault and receive every reply the daemon sends.
+      if (this.state.getWebSockets(role).length > 0) {
+        return new Response("role already connected", { status: 409 });
       }
       const pair = new WebSocketPair();
       const client = pair[0];

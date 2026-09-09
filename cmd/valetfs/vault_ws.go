@@ -18,8 +18,8 @@ import (
 // vaultWSDial claims and connects to a session over the WebSocket hub (Durable
 // Object), returning a ready rpc.Client. If the daemon published an E2EE public
 // key, the connection is end-to-end encrypted (the hub sees only ciphertext).
-func vaultWSDial(signaling, sid string) (transport.Conn, *rpc.Client, error) {
-	conn, daemonPub, hubVersions, err := ws.DialController(signaling, sid)
+func vaultWSDial(signaling, sid, claimSecret string) (transport.Conn, *rpc.Client, error) {
+	conn, daemonPub, hubVersions, err := ws.DialController(signaling, sid, claimSecret)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ws connect: %w", err)
 	}
@@ -80,8 +80,8 @@ func vaultWSPushAll(cl *rpc.Client, v *vault.Vault) error {
 	return nil
 }
 
-func vaultWSPair(v *vault.Vault, vdir, signaling, sid string) error {
-	conn, cl, err := vaultWSDial(signaling, sid)
+func vaultWSPair(v *vault.Vault, vdir, signaling, sid, claimSecret string) error {
+	conn, cl, err := vaultWSDial(signaling, sid, claimSecret)
 	if err != nil {
 		return err
 	}
@@ -97,8 +97,8 @@ func vaultWSPair(v *vault.Vault, vdir, signaling, sid string) error {
 	return nil
 }
 
-func vaultWSSync(v *vault.Vault, signaling, sid string) error {
-	conn, cl, err := vaultWSDial(signaling, sid)
+func vaultWSSync(v *vault.Vault, signaling, sid, claimSecret string) error {
+	conn, cl, err := vaultWSDial(signaling, sid, claimSecret)
 	if err != nil {
 		return err
 	}
@@ -110,8 +110,8 @@ func vaultWSSync(v *vault.Vault, signaling, sid string) error {
 	return nil
 }
 
-func vaultWSStatus(signaling, sid string) error {
-	conn, cl, err := vaultWSDial(signaling, sid)
+func vaultWSStatus(signaling, sid, claimSecret string) error {
+	conn, cl, err := vaultWSDial(signaling, sid, claimSecret)
 	if err != nil {
 		return err
 	}
@@ -127,8 +127,8 @@ func vaultWSStatus(signaling, sid string) error {
 }
 
 // vaultWSSimple issues a single no-param method (UNMOUNT/LOCK) and reports.
-func vaultWSSimple(signaling, sid, method string) error {
-	conn, cl, err := vaultWSDial(signaling, sid)
+func vaultWSSimple(signaling, sid, method, claimSecret string) error {
+	conn, cl, err := vaultWSDial(signaling, sid, claimSecret)
 	if err != nil {
 		return err
 	}

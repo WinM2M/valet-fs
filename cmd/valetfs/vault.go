@@ -22,6 +22,7 @@ func runVault(args []string) error {
 	vdirFlag := fs.String("vault-dir", defaultVaultDir(), "vault directory")
 	passwordFile := fs.String("password-file", "", "password file path")
 	passwordStdin := fs.Bool("password-stdin", false, "read the vault passphrase from stdin")
+	claimSecretFlag := fs.String("claim-secret", "", "claim secret for the session (from the daemon's pairing QR)")
 	transportFlag := fs.String("transport", defaultVaultTransport(), "control-plane transport: ws (default)|webrtc")
 	verbose := fs.Bool("v", false, "verbose output")
 	fs.BoolVar(verbose, "verbose", false, "verbose output")
@@ -125,7 +126,7 @@ func runVault(args []string) error {
 			}
 		}
 		if *transportFlag == "ws" {
-			return vaultWSPair(v, vdir, signaling, sid)
+			return vaultWSPair(v, vdir, signaling, sid, *claimSecretFlag)
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -183,7 +184,7 @@ func runVault(args []string) error {
 		if *transportFlag != "ws" {
 			return fmt.Errorf("lock requires --transport ws")
 		}
-		return vaultWSSimple(signaling, sid, "LOCK")
+		return vaultWSSimple(signaling, sid, "LOCK", *claimSecretFlag)
 	case "unmount":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: valetfs vault unmount <session_id> [--signaling URL]")
@@ -202,7 +203,7 @@ func runVault(args []string) error {
 			}
 		}
 		if *transportFlag == "ws" {
-			return vaultWSSimple(signaling, sid, "UNMOUNT")
+			return vaultWSSimple(signaling, sid, "UNMOUNT", *claimSecretFlag)
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -232,7 +233,7 @@ func runVault(args []string) error {
 			}
 		}
 		if *transportFlag == "ws" {
-			return vaultWSSync(v, signaling, sid)
+			return vaultWSSync(v, signaling, sid, *claimSecretFlag)
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -270,7 +271,7 @@ func runVault(args []string) error {
 				}
 			}
 			if *transportFlag == "ws" {
-				return vaultWSStatus(signaling, sid)
+				return vaultWSStatus(signaling, sid, *claimSecretFlag)
 			}
 			p, err := webrtc.NewController()
 			if err != nil {

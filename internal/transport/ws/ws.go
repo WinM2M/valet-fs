@@ -6,6 +6,8 @@ package ws
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -156,10 +158,26 @@ func (c *Conn) readLoop() {
 	}
 }
 
+// NewClaimSecret mints the credential that authorises claiming a session.
+//
+// It exists so the session id can go back to being what it looks like: a
+// routing identifier, printed to a terminal and carried through logs without
+// consequence. The secret goes only where a person carries it — inside the
+// pairing QR, or inside a connection key — which is what lets a daemon treat
+// "somebody scanned my screen" as evidence rather than a hope.
+func NewClaimSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // DialDaemon creates a new session on the hub and connects as the daemon role.
 // daemonPubB64 (may be empty) is the X25519 public key published for E2EE.
-// It returns the connection (not yet started), the session id, and the token.
-func DialDaemon(hubURL, daemonPubB64 string) (*Conn, string, error) {
+// claimSecret (may be empty for legacy behaviour) gates who may claim it.
+// It returns the connection (not yet started) and the session id.
+func DialDaemon(hubURL, daemonPubB64, claimSecret string) (*Conn, string, error) {
 	if err := checkHubURL(hubURL); err != nil {
 		return nil, "", err
 	}
@@ -170,6 +188,9 @@ func DialDaemon(hubURL, daemonPubB64 string) (*Conn, string, error) {
 	body := map[string]any{"role": "daemon", "init": true, "versions": rpc.Supported}
 	if daemonPubB64 != "" {
 		body["pub"] = daemonPubB64
+	}
+	if claimSecret != "" {
+		body["claim_secret"] = claimSecret
 	}
 	if err := postJSON(hubURL+"/ws/sessions", body, &resp); err != nil {
 		return nil, "", err
@@ -246,7 +267,7 @@ func PublishPub(hubURL, sessionID, token, pubB64 string) error {
 // also returns the daemon's published X25519 public key (base64; may be empty
 // if the daemon did not enable E2EE) and the protocol versions the hub says the
 // daemon supports. Both come from the hub and neither is trusted on its own.
-func DialController(hubURL, sessionID string) (*Conn, string, []int, error) {
+func DialController(hubURL, sessionID, claimSecret string) (*Conn, string, []int, error) {
 	if err := checkHubURL(hubURL); err != nil {
 		return nil, "", nil, err
 	}
@@ -255,7 +276,9 @@ func DialController(hubURL, sessionID string) (*Conn, string, []int, error) {
 		DaemonPub       string `json:"daemon_pub"`
 		Versions        []int  `json:"versions"`
 	}
-	if err := postJSON(fmt.Sprintf("%s/ws/sessions/%s/claim", hubURL, sessionID), nil, &resp); err != nil {
+	if err := postJSONWithHeader(
+		fmt.Sprintf("%s/ws/sessions/%s/claim", hubURL, sessionID),
+		"X-Valet-Claim-Secret", claimSecret, nil, &resp); err != nil {
 		return nil, "", nil, err
 	}
 	c, err := dialWS(hubURL, sessionID, "vault", resp.ControllerToken)
@@ -284,6 +307,10 @@ func toWSScheme(httpURL string) string {
 }
 
 func postJSON(endpoint string, body any, out any) error {
+	return postJSONWithHeader(endpoint, "", "", body, out)
+}
+
+func postJSONWithHeader(endpoint, header, value string, body any, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -294,6 +321,9 @@ func postJSON(endpoint string, body any, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if header != "" && value != "" {
+		req.Header.Set(header, value)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err

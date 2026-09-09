@@ -27,11 +27,16 @@ function fakeState() {
 
 const url = (action) => `https://do/?do=${action}`;
 
-async function create(hub, pub = "PUB", versions = [1]) {
+async function create(hub, pub = "PUB", versions = [1], claimSecret = "") {
   const r = await hub.fetch(new Request(url("create"), {
-    method: "POST", body: JSON.stringify({ pub, versions }),
+    method: "POST", body: JSON.stringify({ pub, versions, claim_secret: claimSecret }),
   }));
   return (await r.json()).daemon_token;
+}
+
+function claimReq(secret) {
+  const headers = secret === undefined ? {} : { "X-Valet-Claim-Secret": secret };
+  return new Request(url("claim"), { method: "POST", headers });
 }
 
 async function del(hub, token) {
@@ -189,6 +194,89 @@ await test("setpub can carry versions for a joining daemon", async () => {
   const claim = await (await hub.fetch(new Request(url("claim"), { method: "POST" }))).json();
   assert.strictEqual(claim.daemon_pub, "JOINED");
   assert.deepStrictEqual(claim.versions, [1]);
+});
+
+// --- claim secret ---------------------------------------------------------
+//
+// The session id used to be the whole credential, and it is printed to a
+// terminal, so it turns up in logs, screenshots and agent transcripts. These
+// cover the credential that replaced it.
+
+const SECRET = "s".repeat(43);
+
+await test("a session with a claim secret cannot be claimed without it", async () => {
+  const hub = new SessionHub(fakeState());
+  await create(hub, "PUB", [1], SECRET);
+  assert.strictEqual((await hub.fetch(claimReq())).status, 403, "no secret");
+  assert.strictEqual((await hub.fetch(claimReq(""))).status, 403, "empty secret");
+  assert.strictEqual((await hub.fetch(claimReq("x".repeat(43)))).status, 403, "wrong secret");
+});
+
+await test("the right claim secret claims the session", async () => {
+  const hub = new SessionHub(fakeState());
+  await create(hub, "PUB", [1], SECRET);
+  const r = await hub.fetch(claimReq(SECRET));
+  assert.strictEqual(r.status, 200);
+  const body = await r.json();
+  assert.ok(body.controller_token, "a token must be issued");
+  assert.strictEqual(body.first_claim, true);
+});
+
+await test("a second claim is reported as not the first", async () => {
+  const hub = new SessionHub(fakeState());
+  await create(hub, "PUB", [1], SECRET);
+  const a = await (await hub.fetch(claimReq(SECRET))).json();
+  const b = await (await hub.fetch(claimReq(SECRET))).json();
+  // The token stays stable so the rightful owner can reconnect, but the second
+  // caller is told a claim already happened — a photographed screen should not
+  // pass unnoticed.
+  assert.strictEqual(a.controller_token, b.controller_token);
+  assert.strictEqual(b.first_claim, false);
+  assert.ok(b.claimed_at > 0);
+});
+
+await test("the hub stores only a hash of the claim secret", async () => {
+  const st = fakeState();
+  const hub = new SessionHub(st);
+  await create(hub, "PUB", [1], SECRET);
+  const stored = [...st._map.values()].map(String);
+  assert.ok(!stored.includes(SECRET), "the secret itself must never be stored");
+  assert.ok(st._map.has("claim_hash"), "a hash must be stored");
+  assert.strictEqual(st._map.get("claim_hash").length, 64);
+});
+
+await test("a legacy session with no claim secret still claims", async () => {
+  const hub = new SessionHub(fakeState());
+  await create(hub, "PUB", [1]);
+  assert.strictEqual((await hub.fetch(claimReq())).status, 200);
+});
+
+await test("a second socket for a role is refused", async () => {
+  const st = fakeState();
+  const hub = new SessionHub(st);
+  await create(hub, "PUB", [1], SECRET);
+  const { controller_token } = await (await hub.fetch(claimReq(SECRET))).json();
+
+  const connect = (role, token) => hub.fetch(new Request(
+    `https://do/?do=connect&role=${role}&token=${token}`, { method: "GET" }));
+
+  // A vault is already attached. Without this guard someone who obtained the
+  // secret could sit alongside the real one and receive every reply the daemon
+  // sends, which is the difference between "they can talk to my daemon" and
+  // "they can read everything I push to it".
+  st.getWebSockets = (role) => (role === "vault" ? [{}] : []);
+  assert.strictEqual((await connect("vault", controller_token)).status, 409);
+
+  // The guard is per role, not global: a daemon may still attach. Getting past
+  // it lands on WebSocketPair, which only exists inside the Workers runtime, so
+  // reaching that is the evidence — the guard did not stop it. Accepting an
+  // actual socket is covered by the Go hub's integration tests.
+  const daemonToken = await st.storage.get("daemon_token");
+  await assert.rejects(
+    () => connect("daemon", daemonToken),
+    /WebSocketPair/,
+    "the other role must get past the guard",
+  );
 });
 
 console.log(`\nSessionHub: ${passed}/${passed} 통과`);

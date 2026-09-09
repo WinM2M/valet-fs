@@ -220,20 +220,33 @@ func serve(args []string) {
 			fmt.Println("The ValetFS app can now push secrets and control this daemon (E2EE).")
 		} else {
 			signaling = cfg.SignalingURL
-			var err error
-			rawConn, sid, err = ws.DialDaemon(signaling, kp.PubB64())
+			claimSecret, err := ws.NewClaimSecret()
+			if err != nil {
+				log.Fatalf("valetd: claim secret: %v", err)
+			}
+			rawConn, sid, err = ws.DialDaemon(signaling, kp.PubB64(), claimSecret)
 			if err != nil {
 				log.Fatalf("valetd: ws dial: %v", err)
 			}
 			daemonToken = rawConn.Token()
-			// QR payload carries the E2EE public key (authenticated out-of-band by
-			// the scan), the session id, and the signaling URL.
+			// The QR carries the E2EE public key (authenticated out of band by the
+			// scan), the session id, the signaling URL — and the claim secret.
+			//
+			// The secret is in the QR and NOWHERE ELSE. Printing it as text, the
+			// way the session id is printed below, would put it in scrollback,
+			// log files, CI output and an agent's transcript, and the point of it
+			// is that the only practical way to obtain it is to look at this
+			// screen. That is what turns "I am standing in front of this machine"
+			// into something the daemon can act on rather than something only the
+			// person holding the phone knows.
 			qrPayload, _ := json.Marshal(map[string]any{
 				"v": 1, "sid": sid, "signaling": signaling, "pub": kp.PubB64(),
+				"claim": claimSecret,
 			})
 			qrterminal.GenerateHalfBlock(string(qrPayload), qrterminal.L, os.Stdout)
 			fmt.Printf("Session ID: %s\n", sid)
 			fmt.Println("Scan with the ValetFS mobile app to pair (E2EE).")
+			fmt.Println("The QR carries a one-time claim secret; typing the session ID alone will not pair.")
 		}
 		n := node.New(node.Config{
 			FS:    d.MemFS(),

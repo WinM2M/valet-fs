@@ -13,6 +13,8 @@ package hub
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -40,6 +42,8 @@ type session struct {
 	vaultTok  string
 	daemonPub string                     // X25519 public key (base64) for E2EE
 	conns     map[string]*websocket.Conn // role -> conn
+	versions  []int
+	claimHash string
 }
 
 func (s *session) other(role string) string {
@@ -93,16 +97,27 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Role string `json:"role"`
-		Init bool   `json:"init"`
-		Pub  string `json:"pub"`
+		Role        string `json:"role"`
+		Init        bool   `json:"init"`
+		Pub         string `json:"pub"`
+		Versions    []int  `json:"versions"`
+		ClaimSecret string `json:"claim_secret"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Role != roleDaemon {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "role must be daemon"})
 		return
 	}
-	sess := &session{id: s.idgen(), daemonTok: randomHex(), daemonPub: body.Pub, conns: map[string]*websocket.Conn{}}
+	sess := &session{
+		id: s.idgen(), daemonTok: randomHex(), daemonPub: body.Pub,
+		versions: body.Versions, conns: map[string]*websocket.Conn{},
+	}
+	// Only the hash, as the Cloudflare hub does. A self-hosted hub is not a more
+	// trusted place to keep the credential that opens a vault.
+	if body.ClaimSecret != "" {
+		sum := sha256.Sum256([]byte(body.ClaimSecret))
+		sess.claimHash = hex.EncodeToString(sum[:])
+	}
 	s.mu.Lock()
 	s.sessions[sess.id] = sess
 	s.mu.Unlock()
@@ -119,13 +134,30 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.mu.Lock()
-	if sess.vaultTok == "" {
+	// The session id is an identifier, not a credential: it is printed to a
+	// terminal and travels through logs. Where a claim secret was set, it is
+	// what authorises claiming — and both hubs have to agree on that, or the
+	// weaker one becomes the way in.
+	if sess.claimHash != "" {
+		sum := sha256.Sum256([]byte(r.Header.Get("X-Valet-Claim-Secret")))
+		if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(sess.claimHash)) != 1 {
+			sess.mu.Unlock()
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+	}
+	first := sess.vaultTok == ""
+	if first {
 		sess.vaultTok = randomHex()
 	}
 	tok := sess.vaultTok
 	pub := sess.daemonPub
+	versions := sess.versions
 	sess.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"controller_token": tok, "daemon_pub": pub})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"controller_token": tok, "daemon_pub": pub,
+		"versions": versions, "first_claim": first,
+	})
 }
 
 func (s *Server) handleWS(ws *websocket.Conn) {
