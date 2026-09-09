@@ -157,7 +157,15 @@ func TestGraceAutoLock(t *testing.T) {
 }
 
 // S4: reconnect within grace cancels the auto-lock.
-func TestGraceCancelOnReconnect(t *testing.T) {
+// Reconnecting and speaking cancels the countdown.
+//
+// This used to pass on the reconnect alone, because the hub's peer_online frame
+// cancelled grace. It no longer does: presence is plaintext and hub-supplied, so
+// letting it cancel would put "the secrets go when the phone goes away" at the
+// mercy of the relay. Real traffic from the peer is the evidence now, and both
+// paths in the app — pushing the vault, and the session screen's status call —
+// send something immediately after connecting.
+func TestGraceCancelledByPeerTraffic(t *testing.T) {
 	hubURL := newHub(t)
 	d := startDaemon(t, hubURL, 1*time.Second)
 
@@ -166,16 +174,47 @@ func TestGraceCancelOnReconnect(t *testing.T) {
 	conn.Close()
 
 	time.Sleep(200 * time.Millisecond) // within grace
-	conn2, _ := connectVault(t, hubURL, d.sid)
+	conn2, cl2 := connectVault(t, hubURL, d.sid)
 	defer conn2.Close()
+
+	ctx, cancel := callCtx()
+	defer cancel()
+	if _, err := cl2.Call(ctx, rpc.MethodStatus, nil); err != nil {
+		t.Fatalf("status after reconnect: %v", err)
+	}
 
 	time.Sleep(1200 * time.Millisecond) // past original deadline
 
 	if !d.isMounted() {
-		t.Fatal("expected still mounted (grace cancelled by reconnect)")
+		t.Fatal("expected still mounted (grace cancelled by peer traffic)")
 	}
 	if d.fs.Used() == 0 {
 		t.Fatal("expected file retained after reconnect")
+	}
+}
+
+// The other half of the same rule: a peer that merely appears does not hold the
+// secrets open. A hostile hub can emit peer_online for as long as it likes; the
+// daemon still locks on schedule unless somebody actually speaks to it.
+func TestPresenceAloneDoesNotCancelGrace(t *testing.T) {
+	hubURL := newHub(t)
+	d := startDaemon(t, hubURL, 500*time.Millisecond)
+
+	conn, cl := connectVault(t, hubURL, d.sid)
+	pushFile(t, cl, "/keys/secret.txt", []byte("token"))
+	conn.Close() // arms grace via peer_offline
+
+	// Reconnect, which makes the hub emit peer_online, and then say nothing.
+	conn2, _ := connectVault(t, hubURL, d.sid)
+	defer conn2.Close()
+
+	time.Sleep(900 * time.Millisecond) // past the deadline
+
+	if d.isMounted() {
+		t.Fatal("presence alone must not keep a daemon unlocked")
+	}
+	if d.fs.Used() != 0 {
+		t.Fatal("expected the heap to be wiped on grace expiry")
 	}
 }
 
