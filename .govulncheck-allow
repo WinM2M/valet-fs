@@ -1,0 +1,19 @@
+# Reachable vulnerabilities we have consciously accepted, one ID per line.
+# Anything reachable and absent from this file fails scripts/vulncheck.sh.
+#
+# Every entry needs: why it cannot be fixed now, what it would take, and where
+# the decision is tracked. An entry with no reason is a bug in this file.
+
+# GO-2026-4479 — pion/dtls: random nonce generation with AES-GCM risks leaking
+# the authentication key.
+#   Found in : github.com/pion/dtls/v2@v2.2.12
+#   Fixed in : N/A — there is no fix in the v2 line. The fix lives in dtls/v3,
+#              which requires pion/webrtc v4, a breaking API change against
+#              internal/webrtc (~700 lines).
+#   Exposure : reachable only through the legacy WebRTC transport. It is no
+#              longer the default (config.go: --transport defaults to ws) and
+#              has to be asked for with --transport webrtc.
+#   Decision : tracked in tmp/security-campaign-2026-09.md — either bump to
+#              pion/webrtc v4 or drop the WebRTC transport outright. Removing it
+#              also retires TURN/Metered and the legacy signaling endpoints.
+GO-2026-4479

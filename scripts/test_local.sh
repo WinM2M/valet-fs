@@ -9,22 +9,25 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "[1/4] go vet"
+echo "[1/5] go vet"
 go vet ./...
 
-echo "[2/4] unit + integration tests (-race)"
+echo "[2/5] unit + integration tests (-race)"
 go test -race ./internal/...
 
-echo "[3/4] control-plane scenarios (verbose)"
+echo "[3/5] control-plane scenarios (verbose)"
 go test -v ./internal/node/ -run \
   'TestPairAndPush|TestReliableRejoin|TestGraceAutoLock|TestGraceCancelOnReconnect|TestReconcileDaemonSideAdditions|TestExplicitUnmount'
 
-echo "[4/4] signaling hub (SessionHub Durable Object)"
+echo "[4/5] signaling hub (SessionHub Durable Object)"
 if command -v node >/dev/null 2>&1; then
   (cd signaling && node --experimental-strip-types worker.test.mjs)
 else
   echo "  skipped: node not installed"
 fi
+
+echo "[5/5] govulncheck (reachable vulnerabilities only)"
+./scripts/vulncheck.sh
 
 echo
 echo "OK: DO/ws control-plane local tests passed."
