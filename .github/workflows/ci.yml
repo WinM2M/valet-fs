@@ -39,6 +39,12 @@ jobs:
         run: node --experimental-strip-types worker.test.mjs
         working-directory: signaling
 
+      # The installer is what puts a secrets-holding binary on a user's machine.
+      # Its verification logic used to be exercised only in production, where a
+      # mistake looks like a successful install of a tampered binary.
+      - name: install.sh verification
+        run: ./scripts/install_verify_test.sh
+
       - name: Cross-compile
         run: |
           GOOS=windows go build ./... 

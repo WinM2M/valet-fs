@@ -47,17 +47,68 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # id-token lets cosign sign without a private key: the signature is bound to
+    # this workflow's identity and recorded in Sigstore's public transparency
+    # log. attestations records SLSA build provenance for the same artifacts.
+    #
+    # Worth being honest about what this does and does not buy. An attacker who
+    # can modify this workflow can still produce a valid signature. What changes
+    # is that they can no longer do it quietly: every signature lands in a public
+    # append-only log, and the certificate names the workflow that made it. The
+    # threat this does not cover is a compromise of the GitHub account itself,
+    # which is why the app carries the expected digest through Apple's pipeline
+    # as an independent second channel.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
 
+      - name: Collect binaries
+        run: |
+          mkdir -p out
+          cp dist/valetfs-linux-amd64/valetfs-linux-amd64 out/
+          cp dist/valetfs-linux-arm64/valetfs-linux-arm64 out/
+
+      # One signed file covering every artifact, rather than a signature each:
+      # the installer then needs a single verification step, and adding an
+      # architecture cannot silently ship unsigned.
+      - name: Generate SHA256SUMS
+        working-directory: out
+        run: |
+          sha256sum valetfs-linux-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SHA256SUMS (keyless)
+        working-directory: out
+        run: |
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            out/valetfs-linux-amd64
+            out/valetfs-linux-arm64
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            dist/valetfs-linux-amd64/valetfs-linux-amd64
-            dist/valetfs-linux-arm64/valetfs-linux-arm64
+            out/valetfs-linux-amd64
+            out/valetfs-linux-arm64
+            out/SHA256SUMS
+            out/SHA256SUMS.sig
+            out/SHA256SUMS.pem
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
