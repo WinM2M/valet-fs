@@ -441,7 +441,7 @@ func runCLI(args []string) error {
 			return fmt.Errorf("usage: valetd cat <fs-path>")
 		}
 		if isHostPath(args[1]) {
-			return fmt.Errorf("cat only handles fs paths, host path is not supported: %s", args[1])
+			return hintVaultPath("cat", args[1])
 		}
 		q := url.Values{"path": []string{toFSPathArg(args[1])}}
 		resp, err := apiReq(client, base, st.ControlToken, http.MethodGet, "/files", q, nil)
@@ -537,7 +537,7 @@ func runLS(client *http.Client, base, token string, args []string) error {
 	p := "/"
 	if fs.NArg() > 0 {
 		if isHostPath(fs.Arg(0)) {
-			return fmt.Errorf("ls only handles fs paths, host path is not supported: %s", fs.Arg(0))
+			return hintVaultPath("ls", fs.Arg(0))
 		}
 		p = toFSPathArg(fs.Arg(0))
 	}
@@ -683,7 +683,20 @@ func runCP(client *http.Client, base, token string, args []string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(dst, data, 0o600)
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			return err
+		}
+		// Say it out loud. The point of this program is to keep secrets off
+		// disk, and this is the one command that puts them back; doing it
+		// silently means a mistyped path leaks without anyone noticing.
+		_, _ = fmt.Fprintf(os.Stderr,
+			"note: wrote the secret at %s to disk at %s (%d bytes). "+
+				"Remove it when you are done.\n", srcFSPath, dst, len(data))
+		return nil
+	}
+	if looksLikeVaultPath(src) {
+		return fmt.Errorf("cp needs an fs: path. %s is a host path and does not exist here. "+
+			"Did you mean fs:%s ?", src, src)
 	}
 	return errors.New("cp requires at least one fs: path")
 }
@@ -702,7 +715,7 @@ func runRM(client *http.Client, base, token string, args []string) error {
 	}
 	p := fs.Arg(0)
 	if isHostPath(p) {
-		return fmt.Errorf("rm only handles fs paths, host path is not supported: %s", p)
+		return hintVaultPath("rm", p)
 	}
 	if !*recursive {
 		isDir, err := fsPathIsDirWithErr(client, base, token, toFSPathArg(p))
@@ -942,11 +955,40 @@ func apiReq(client *http.Client, base, token, method, path string, q url.Values,
 	return resp, nil
 }
 
+// isHostPath decides whether an argument names a file on this machine or a path
+// inside the vault. An absolute path is a host path: "fs:" is what marks the
+// vault. That is a coin toss for something like /keys/aws.env, which reads as a
+// vault path to a human and as a host path to this function, so callers pair it
+// with hintVaultPath to explain the mismatch rather than failing opaquely.
 func isHostPath(p string) bool {
 	if strings.HasPrefix(p, "fs:") {
 		return false
 	}
 	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../")
+}
+
+// looksLikeVaultPath reports whether a host path resembles something the user
+// probably meant to address inside the vault. Deliberately narrow: an absolute
+// path that does not exist on this machine is far more likely a vault path typed
+// without the prefix than a real file.
+func looksLikeVaultPath(p string) bool {
+	if !strings.HasPrefix(p, "/") {
+		return false
+	}
+	if _, err := os.Stat(p); err == nil {
+		return false // it exists here, so take it at face value
+	}
+	return true
+}
+
+// hintVaultPath returns an error that names the likely fix, instead of leaving
+// the user to guess which of two path spaces the command was talking about.
+func hintVaultPath(cmd, p string) error {
+	if looksLikeVaultPath(p) {
+		return fmt.Errorf("%s only handles fs paths: %s is a host path and does not exist here. "+
+			"Did you mean fs:%s ?", cmd, p, p)
+	}
+	return fmt.Errorf("%s only handles fs paths, host path is not supported: %s", cmd, p)
 }
 
 func toFSPathArg(p string) string {
