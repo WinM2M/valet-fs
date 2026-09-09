@@ -3,6 +3,7 @@ module github.com/anomalyco/valet-fs
 go 1.26.0
 
 require (
+	github.com/flynn/noise v1.1.0
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1

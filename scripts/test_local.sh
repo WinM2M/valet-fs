@@ -15,7 +15,10 @@ go vet ./...
 echo "[2/6] unit + integration tests (-race)"
 go test -race ./internal/... ./cmd/...
 
-echo "[3/6] control-plane scenarios (verbose)"
+echo "[3/6] Noise IK conformance (official vectors)"
+go test -v ./internal/noise/ -run TestIKMatchesOfficialVectors | grep -E '^(=== RUN|--- |ok|FAIL)'
+
+echo "[3b/6] control-plane scenarios (verbose)"
 go test -v ./internal/node/ -run \
   'TestPairAndPush|TestReliableRejoin|TestGraceAutoLock|TestGraceCancelOnReconnect|TestReconcileDaemonSideAdditions|TestExplicitUnmount'
 
