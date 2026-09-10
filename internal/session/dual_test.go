@@ -1,8 +1,10 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/anomalyco/valet-fs/internal/e2ee"
 )
@@ -26,7 +28,9 @@ func TestDualServesV2AndKeepsTheFirstFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Start(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := v.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,7 +117,9 @@ func TestDualDoesNotSwitchVersions(t *testing.T) {
 		V2:    Config{SessionID: "sid-1", Static: dk, Authorised: [][]byte{vk.Public}},
 	})
 	v, _ := NewVault(Config{Inner: vp, SessionID: "sid-1", Static: vk, PeerStatic: dk.Public})
-	_ = v.Start()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	_ = v.Start(ctx2)
 	if d.Version() != 2 {
 		t.Fatalf("want v2, got %d", d.Version())
 	}

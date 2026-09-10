@@ -17,15 +17,19 @@ package rpc
 // version it has ever seen a given daemon support and refuses to go below it.
 const (
 	// V1 is the original protocol: X25519 + HKDF + ChaCha20-Poly1305 with an
-	// unauthenticated controller.
+	// unauthenticated controller. Kept only so the shipped app keeps working
+	// while v2 rolls out; M3 removes it.
 	V1 = 1
+	// V2 is Noise_IK_25519_ChaChaPoly_SHA256 with an authorised vault identity,
+	// a key per direction, and frames bound to their session.
+	V2 = 2
 )
 
 // Supported lists every version this build can speak, ascending.
-var Supported = []int{V1}
+var Supported = []int{V1, V2}
 
 // Current is the newest version this build speaks.
-const Current = V1
+const Current = V2
 
 // Negotiate picks the highest version both sides support, or 0 when there is no
 // overlap. floor rejects anything below a previously observed version, which is

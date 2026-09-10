@@ -1,10 +1,12 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/flynn/noise"
 )
@@ -77,9 +79,13 @@ func establish(t *testing.T, sid string, vaultKey, daemonKey noise.DHKey, author
 	if err != nil {
 		t.Fatalf("daemon: %v", err)
 	}
-	if err := v.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	// A bounded context: a refused vault never gets a reply, and a helper that
+	// waits forever turns a refusal into a hung test rather than a failed one.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// The error is the assertion's business, not the helper's: several tests
+	// here exist precisely because the handshake should not succeed.
+	_ = v.Start(ctx)
 	return v, d, vp, dp
 }
 
@@ -145,7 +151,7 @@ func TestTrustOnFirstUseReportsThePinnedKey(t *testing.T) {
 		Inner: dp, SessionID: "sid-1", Static: dk,
 		OnPin: func(pub []byte) { pinned = append([]byte(nil), pub...) },
 	})
-	if err := v.Start(); err != nil {
+	if err := v.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !d.Established() {
@@ -237,7 +243,11 @@ func TestSecondHandshakeIsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = av.Start()
+	// Nothing answers this pipe, so the handshake never completes; the point is
+	// only to obtain a well-formed message 1 to inject below.
+	actx, acancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer acancel()
+	_ = av.Start(actx)
 	var f frame
 	if err := json.Unmarshal(ap.lastSent(), &f); err != nil {
 		t.Fatal(err)

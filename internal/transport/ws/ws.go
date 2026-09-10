@@ -177,7 +177,7 @@ func NewClaimSecret() (string, error) {
 // daemonPubB64 (may be empty) is the X25519 public key published for E2EE.
 // claimSecret (may be empty for legacy behaviour) gates who may claim it.
 // It returns the connection (not yet started) and the session id.
-func DialDaemon(hubURL, daemonPubB64, claimSecret string) (*Conn, string, error) {
+func DialDaemon(hubURL, daemonPubB64, pubV2B64, claimSecret string) (*Conn, string, error) {
 	if err := checkHubURL(hubURL); err != nil {
 		return nil, "", err
 	}
@@ -188,6 +188,9 @@ func DialDaemon(hubURL, daemonPubB64, claimSecret string) (*Conn, string, error)
 	body := map[string]any{"role": "daemon", "init": true, "versions": rpc.Supported}
 	if daemonPubB64 != "" {
 		body["pub"] = daemonPubB64
+	}
+	if pubV2B64 != "" {
+		body["pub_v2"] = pubV2B64
 	}
 	if claimSecret != "" {
 		body["claim_secret"] = claimSecret
@@ -230,18 +233,20 @@ func JoinDaemon(hubURL, sessionID, token string) (*Conn, error) {
 	return ReconnectDaemon(hubURL, sessionID, token)
 }
 
-// PublishPub uploads the daemon's X25519 public key to an existing session,
-// authenticated by the daemon token. Used by the reverse (join) flow, where the
-// pub was not set at create time.
-func PublishPub(hubURL, sessionID, token, pubB64 string) error {
+// PublishPub uploads the daemon's public keys to an existing session. pubB64 is
+// the v1 X25519 key; pubV2B64 is the v2 Noise static key. Both are published so
+// a client can open either version without a second round trip.
+func PublishPub(hubURL, sessionID, token, pubB64, pubV2B64 string) error {
 	if err := checkHubURL(hubURL); err != nil {
 		return err
 	}
-	// The version list travels with the pubkey so a client learns what this
+	// The version list travels with the pubkeys so a client learns what this
 	// daemon speaks before it opens a socket. It is hub-supplied and therefore
 	// not trusted; the daemon repeats it over the encrypted channel in STATUS
 	// so a client can catch a hub that edited it.
-	body, _ := json.Marshal(map[string]any{"pub": pubB64, "versions": rpc.Supported})
+	body, _ := json.Marshal(map[string]any{
+		"pub": pubB64, "pub_v2": pubV2B64, "versions": rpc.Supported,
+	})
 	req, err := http.NewRequest(
 		http.MethodPost,
 		fmt.Sprintf("%s/ws/sessions/%s/pub", hubURL, sessionID),
@@ -274,6 +279,7 @@ func DialController(hubURL, sessionID, claimSecret string) (*Conn, string, []int
 	var resp struct {
 		ControllerToken string `json:"controller_token"`
 		DaemonPub       string `json:"daemon_pub"`
+		DaemonPubV2     string `json:"daemon_pub_v2"`
 		Versions        []int  `json:"versions"`
 	}
 	if err := postJSONWithHeader(

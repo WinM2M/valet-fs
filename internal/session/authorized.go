@@ -12,7 +12,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/flynn/noise"
+	"golang.org/x/crypto/curve25519"
 )
+
+// basepoint is the X25519 generator, used to recover a public key from a stored
+// private scalar.
+func basepoint() []byte { return append([]byte(nil), curve25519.Basepoint...) }
 
 // AuthorizedVaults is the daemon's list of vault identities it will accept —
 // SSH's authorized_keys, for the other direction of trust than the one ValetFS
@@ -193,4 +200,43 @@ func (a *AuthorizedVaults) save() error {
 // several entries can be reasoned about later.
 func DefaultLabel(now time.Time) string {
 	return "pinned-" + now.UTC().Format("2006-01-02")
+}
+
+// LoadOrGenerateStatic returns the Noise static key stored at path, creating and
+// persisting one if it is absent. An empty path yields an ephemeral key.
+//
+// This is deliberately a different file from the v1 key. Reusing one key pair
+// across two protocols is the kind of shortcut that is fine until one of the
+// protocols turns out to have a flaw, at which point it is not confined to that
+// protocol. They are the same curve, which makes the shortcut tempting and is
+// exactly why it is worth refusing.
+func LoadOrGenerateStatic(path string) (noise.DHKey, bool, error) {
+	if path == "" {
+		k, err := GenerateStatic()
+		return k, false, err
+	}
+	if b, err := os.ReadFile(path); err == nil {
+		if len(b) != 32 {
+			return noise.DHKey{}, false, fmt.Errorf("%s: want 32 bytes, got %d", path, len(b))
+		}
+		pub, err := suite.DH(b, basepoint())
+		if err != nil {
+			return noise.DHKey{}, false, fmt.Errorf("%s: %w", path, err)
+		}
+		return noise.DHKey{Private: append([]byte(nil), b...), Public: pub}, true, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return noise.DHKey{}, false, err
+	}
+
+	k, err := GenerateStatic()
+	if err != nil {
+		return noise.DHKey{}, false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return noise.DHKey{}, false, err
+	}
+	if err := os.WriteFile(path, k.Private, 0o600); err != nil {
+		return noise.DHKey{}, false, err
+	}
+	return k, false, nil
 }

@@ -146,3 +146,60 @@ func TestKeysFeedTheSessionLayer(t *testing.T) {
 		t.Fatal("a vault that is not on the list must be refused")
 	}
 }
+
+// The Noise static key is a different file from the v1 key on purpose: sharing
+// one key pair across two protocols means a flaw in either is not confined to it.
+func TestLoadOrGenerateStaticPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "noise.key")
+
+	first, reused, err := LoadOrGenerateStatic(path)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if reused {
+		t.Fatal("a fresh file cannot be a reuse")
+	}
+
+	again, reused, err := LoadOrGenerateStatic(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !reused {
+		t.Fatal("the second call must report reuse")
+	}
+	if !subtleEqual(first.Public, again.Public) {
+		t.Fatal("the identity changed across a restart")
+	}
+
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("a private key file must be 0600, got %o", perm)
+	}
+}
+
+func TestEmptyPathGivesAnEphemeralKey(t *testing.T) {
+	a, _, err := LoadOrGenerateStatic("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := LoadOrGenerateStatic("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subtleEqual(a.Public, b.Public) {
+		t.Fatal("without a path each start must be a new identity")
+	}
+}
+
+func TestCorruptKeyFileIsAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "noise.key")
+	if err := os.WriteFile(path, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadOrGenerateStatic(path); err == nil {
+		t.Fatal("a truncated key file must be reported, not silently replaced")
+	}
+}

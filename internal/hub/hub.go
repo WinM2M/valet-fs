@@ -36,14 +36,15 @@ type presence struct {
 }
 
 type session struct {
-	mu        sync.Mutex
-	id        string
-	daemonTok string
-	vaultTok  string
-	daemonPub string                     // X25519 public key (base64) for E2EE
-	conns     map[string]*websocket.Conn // role -> conn
-	versions  []int
-	claimHash string
+	mu          sync.Mutex
+	id          string
+	daemonTok   string
+	vaultTok    string
+	daemonPub   string                     // X25519 public key (base64) for E2EE
+	conns       map[string]*websocket.Conn // role -> conn
+	versions    []int
+	claimHash   string
+	daemonPubV2 string
 }
 
 func (s *session) other(role string) string {
@@ -100,6 +101,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Role        string `json:"role"`
 		Init        bool   `json:"init"`
 		Pub         string `json:"pub"`
+		PubV2       string `json:"pub_v2"`
 		Versions    []int  `json:"versions"`
 		ClaimSecret string `json:"claim_secret"`
 	}
@@ -109,7 +111,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := &session{
-		id: s.idgen(), daemonTok: randomHex(), daemonPub: body.Pub,
+		id: s.idgen(), daemonTok: randomHex(), daemonPub: body.Pub, daemonPubV2: body.PubV2,
 		versions: body.Versions, conns: map[string]*websocket.Conn{},
 	}
 	// Only the hash, as the Cloudflare hub does. A self-hosted hub is not a more
@@ -152,10 +154,11 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := sess.vaultTok
 	pub := sess.daemonPub
+	pubV2 := sess.daemonPubV2
 	versions := sess.versions
 	sess.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"controller_token": tok, "daemon_pub": pub,
+		"controller_token": tok, "daemon_pub": pub, "daemon_pub_v2": pubV2,
 		"versions": versions, "first_claim": first,
 	})
 }

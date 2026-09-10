@@ -218,7 +218,7 @@ export default {
       if (req.method === "POST" && parts.length === 2 && parts[1] === "sessions") {
         await audit(req, "ws.sessions.create");
         const body = (await req.json().catch(() => ({}))) as {
-          role?: string; pub?: string; versions?: number[]; claim_secret?: string;
+          role?: string; pub?: string; pub_v2?: string; versions?: number[]; claim_secret?: string;
         };
         if (body.role !== "daemon") return json({ error: "role must be daemon" }, 400);
         const sid = randomID();
@@ -227,6 +227,7 @@ export default {
           method: "POST",
           body: JSON.stringify({
             pub: body.pub || "",
+            pub_v2: body.pub_v2 || "",
             versions: body.versions ?? [],
             claim_secret: body.claim_secret || "",
           }),
@@ -521,6 +522,7 @@ export class SessionHub {
     if (action === "create") {
       const token = randomToken();
       let pub = "";
+      let pubV2 = "";
       let versions: number[] = [];
       let claimSecret = "";
       // Server clock, deliberately. A caller-supplied timestamp would let the
@@ -529,9 +531,10 @@ export class SessionHub {
       const createdAt = Date.now();
       try {
         const b = (await req.json()) as {
-          pub?: string; versions?: number[]; claim_secret?: string;
+          pub?: string; pub_v2?: string; versions?: number[]; claim_secret?: string;
         };
         pub = b.pub || "";
+        pubV2 = b.pub_v2 || "";
         versions = Array.isArray(b.versions) ? b.versions : [];
         claimSecret = b.claim_secret || "";
       } catch {
@@ -540,6 +543,7 @@ export class SessionHub {
       await this.state.storage.put("daemon_token", token);
       await this.state.storage.put("created_at", createdAt);
       if (pub) await this.state.storage.put("daemon_pub", pub);
+      if (pubV2) await this.state.storage.put("daemon_pub_v2", pubV2);
       if (versions.length) await this.state.storage.put("versions", versions);
       // Only the hash. The secret itself exists in the QR or the connection key
       // and nowhere on this server.
@@ -556,13 +560,24 @@ export class SessionHub {
       const hdr = req.headers.get("X-Valet-Role-Token") || "";
       if (!token || hdr !== token) return new Response("forbidden", { status: 403 });
       let pub = "";
+      let pubV2 = "";
       let versions: number[] = [];
       try {
-        const b = (await req.json()) as { pub?: string; versions?: number[] };
+        const b = (await req.json()) as { pub?: string; pub_v2?: string; versions?: number[] };
         pub = b.pub || "";
+        pubV2 = b.pub_v2 || "";
         versions = Array.isArray(b.versions) ? b.versions : [];
       } catch {
         // no body
+      }
+      // Same first-writer-wins rule as daemon_pub: a party that later obtains
+      // the token cannot swap the identity a client is about to authenticate.
+      if (pubV2) {
+        const existingV2 = await this.state.storage.get<string>("daemon_pub_v2");
+        if (existingV2 && existingV2 !== pubV2) {
+          return new Response("daemon_pub_v2 already set", { status: 409 });
+        }
+        await this.state.storage.put("daemon_pub_v2", pubV2);
       }
       // Relayed verbatim and never interpreted here. Clients treat this list as
       // an unauthenticated hint and re-check it against what the daemon reports
@@ -651,10 +666,11 @@ export class SessionHub {
         await this.state.storage.put("claimed_at", now);
       }
       const pub = (await this.state.storage.get<string>("daemon_pub")) || "";
+      const pubV2 = (await this.state.storage.get<string>("daemon_pub_v2")) || "";
       const versions = (await this.state.storage.get<number[]>("versions")) || [];
       const claimedAt = (await this.state.storage.get<number>("claimed_at")) || 0;
       return new Response(JSON.stringify({
-        controller_token: token, daemon_pub: pub, versions,
+        controller_token: token, daemon_pub: pub, daemon_pub_v2: pubV2, versions,
         // Surfaces "somebody already claimed this" to whoever asks second.
         first_claim: existing ? false : true,
         claimed_at: claimedAt,

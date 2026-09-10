@@ -25,6 +25,7 @@
 package session
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -85,6 +86,26 @@ type Conn struct {
 	onOpen  func()
 	onClose func()
 	failErr error
+	// ready closes once the session can carry traffic. v1 needed nothing like
+	// this because its controller derived a key with no round trip; v2 has one,
+	// so a caller that sends immediately after Start would otherwise race the
+	// handshake and get an error that looks like a bug in the peer.
+	ready     chan struct{}
+	readyOnce sync.Once
+}
+
+func (c *Conn) markReady() { c.readyOnce.Do(func() { close(c.ready) }) }
+
+// abandon unblocks a waiting Start when the session can no longer complete —
+// the peer refused us, or the connection went away. Waiting out a timeout for a
+// question that has already been answered is just a slower way to fail.
+func (c *Conn) abandon(err error) {
+	c.mu.Lock()
+	if c.failErr == nil {
+		c.failErr = err
+	}
+	c.mu.Unlock()
+	c.markReady()
 }
 
 // Config describes one end of a session.
@@ -145,8 +166,9 @@ func NewVault(cfg Config) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session: %w", err)
 	}
-	c := &Conn{inner: cfg.Inner, initiator: true, sid: cfg.SessionID, hs: hs, peerPub: cfg.PeerStatic}
+	c := &Conn{inner: cfg.Inner, initiator: true, sid: cfg.SessionID, hs: hs, peerPub: cfg.PeerStatic, ready: make(chan struct{})}
 	cfg.Inner.OnData(c.handle)
+	cfg.Inner.OnClose(func() { c.abandon(errors.New("session: connection closed")) })
 	return c, nil
 }
 
@@ -164,7 +186,7 @@ func NewDaemon(cfg Config) (*Conn, error) {
 	}
 	c := &Conn{
 		inner: cfg.Inner, initiator: false, sid: cfg.SessionID, hs: hs,
-		authorised: cfg.Authorised, onPin: cfg.OnPin,
+		authorised: cfg.Authorised, onPin: cfg.OnPin, ready: make(chan struct{}),
 	}
 	cfg.Inner.OnData(c.handle)
 	return c, nil
@@ -270,6 +292,7 @@ func (c *Conn) readHandshake1(f frame) {
 	b, _ := json.Marshal(frame{NX: "2", M: base64.StdEncoding.EncodeToString(out)})
 	_ = c.inner.Send(b)
 	c.hs = nil
+	c.markReady()
 }
 
 func (c *Conn) readHandshake2(f frame) {
@@ -292,6 +315,7 @@ func (c *Conn) readHandshake2(f frame) {
 	}
 	c.send, c.recv = cs1, cs2
 	c.hs = nil
+	c.markReady()
 }
 
 func (c *Conn) readTransport(f frame) {
@@ -338,9 +362,14 @@ func (c *Conn) Send(b []byte) error {
 	return c.inner.Send(out)
 }
 
-// Start begins the handshake (the vault writes message 1) and starts the inner
-// transport's read loop.
-func (c *Conn) Start() error {
+// Start begins the handshake and, for the vault, does not return until the
+// session can carry traffic or ctx is done.
+//
+// Waiting is part of Start rather than a separate call the caller must remember,
+// because forgetting it fails as "handshake not complete" on the first send —
+// an error that reads like a fault in the peer rather than a race in the caller.
+// The daemon side has nothing to wait for: it answers when the vault speaks.
+func (c *Conn) Start(ctx context.Context) error {
 	if c.initiator {
 		c.mu.Lock()
 		out, _, _, err := c.hs.WriteMessage(nil, nil)
@@ -362,7 +391,24 @@ func (c *Conn) Start() error {
 	if fn != nil {
 		fn()
 	}
-	return nil
+	if !c.initiator {
+		return nil
+	}
+	select {
+	case <-c.ready:
+		if err := c.Err(); err != nil {
+			return err
+		}
+		if !c.Established() {
+			return errors.New("session: the peer closed the connection during the handshake")
+		}
+		return nil
+	case <-ctx.Done():
+		if err := c.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf("session: handshake did not complete: %w", ctx.Err())
+	}
 }
 
 func (c *Conn) OnData(fn func([]byte)) { c.mu.Lock(); c.onData = fn; c.mu.Unlock() }

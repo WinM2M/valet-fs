@@ -50,7 +50,7 @@ func startDaemon(t *testing.T, hubURL string, grace time.Duration) *daemonHarnes
 		t.Fatalf("claim secret: %v", err)
 	}
 	h.claim = claim
-	conn, sid, err := ws.DialDaemon(hubURL, "", claim)
+	conn, sid, err := ws.DialDaemon(hubURL, "", "", claim)
 	if err != nil {
 		t.Fatalf("daemon dial: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestE2EEEncryptedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim secret: %v", err)
 	}
-	rawD, sid, err := ws.DialDaemon(hubURL, dkp.PubB64(), claim)
+	rawD, sid, err := ws.DialDaemon(hubURL, dkp.PubB64(), "", claim)
 	if err != nil {
 		t.Fatalf("daemon dial: %v", err)
 	}
