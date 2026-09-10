@@ -19,7 +19,12 @@ REQUIRE_SIGNATURE="${VALETFS_REQUIRE_SIGNATURE:-0}"
 
 # The identity a valid signature must carry. A signature that verifies against
 # some other workflow is not evidence of anything.
-COSIGN_IDENTITY_RE="${VALETFS_COSIGN_IDENTITY:-^https://github.com/${REPO}/\\.github/workflows/release\\.yml@refs/tags/}"
+# Case-insensitive on purpose. The certificate names the repository with
+# GitHub's canonical capitalisation (WinM2M), REPO here is lowercase, and a
+# mismatch fails closed — safe, but it means nobody can install. Found by
+# running the installer against a real signed release rather than reasoning
+# about it.
+COSIGN_IDENTITY_RE="${VALETFS_COSIGN_IDENTITY:-(?i)^https://github.com/${REPO}/\\.github/workflows/release\\.yml@refs/tags/}"
 COSIGN_ISSUER="${VALETFS_COSIGN_ISSUER:-https://token.actions.githubusercontent.com}"
 
 cleanup() {
