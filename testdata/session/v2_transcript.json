@@ -1,0 +1,27 @@
+{
+ "daemon_eph": "4444444444444444444444444444444444444444444444444444444444444444",
+ "daemon_plaintexts": [
+  "eyJ2IjoxLCJ0eXBlIjoiUkVTIiwib2siOnRydWV9"
+ ],
+ "daemon_priv": "2222222222222222222222222222222222222222222222222222222222222222",
+ "daemon_pub": "0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20",
+ "frames_daemon": [
+  "{\"nx\":\"2\",\"m\":\"/y7kVgHsG2cxDHeQQEWFrmlzMe7hwfjPJBlzHB//Pms9I+UQQrSPTAUrc9RYR8cs\"}",
+  "{\"n\":\"pH0W7mL2JopADDboauR6pLOfErWuBPxbHGpDGftZ2BySIxERwYrYYmuKOsiZXg==\"}"
+ ],
+ "frames_vault": [
+  "{\"nx\":\"1\",\"m\":\"ew1H2TQn+DERYHgcfHM/2J+IlwrvSQ2KoO4ZpMuKGxQYAgnSLmyVvzsZjv0OOvLBIaajRk3tGL1gqZamPlW4aTu+2zmoCA7kaL3dNdJhX1Rc7XY0HYS40Vjz+KhM4J3d\"}",
+  "{\"n\":\"zdMt7V2Xkxno7mYEK0OyAo7JO94HnoIxQRT2mr/6/mT7zfJ157xs1EJ8dLBxXnjGP3uEranG\"}",
+  "{\"n\":\"dfxTg4IlTjvxqrUh2wAXk9X2YhEVDlF+iOFALg4ezk7/s0aTZoEt4E38TX+1X5zg+hi/QEf8PNJ3Wh9hdP9+9alOxX1R9u7smpEnr0jOFLLTFLwdYA==\"}"
+ ],
+ "note": "A real v2 session recorded from internal/session, with fixed ephemerals so it replays exactly. The official Noise vectors prove the handshake; this proves the layer around it — frame shapes, prologue, and additional data — which is where two conformant implementations can still fail to talk.",
+ "protocol": "Noise_IK_25519_ChaChaPoly_SHA256",
+ "session_id": "0123456789abcdef0123456789abcdef",
+ "vault_eph": "3333333333333333333333333333333333333333333333333333333333333333",
+ "vault_plaintexts": [
+  "eyJ2IjoxLCJ0eXBlIjoiUkVRIiwibWV0aG9kIjoiU1RBVFVTIn0=",
+  "eyJ2IjoxLCJ0eXBlIjoiUkVRIiwibWV0aG9kIjoiV1JJVEUiLCJwYXJhbXMiOnsicGF0aCI6Ii9rZXlzL3Rva2VuIn19"
+ ],
+ "vault_priv": "1111111111111111111111111111111111111111111111111111111111111111",
+ "vault_pub": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13"
+}

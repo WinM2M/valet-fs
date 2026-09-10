@@ -259,3 +259,17 @@ func TestSecondHandshakeIsIgnored(t *testing.T) {
 		t.Fatal("a second handshake replaced the established peer identity")
 	}
 }
+
+func shortCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 2*time.Second)
+}
+
+// keyFromPrivate rebuilds a key pair from a fixed private scalar, for
+// reproducible transcripts.
+func keyFromPrivate(priv []byte) (noise.DHKey, error) {
+	pub, err := suite.DH(priv, basepoint())
+	if err != nil {
+		return noise.DHKey{}, err
+	}
+	return noise.DHKey{Private: append([]byte(nil), priv...), Public: pub}, nil
+}

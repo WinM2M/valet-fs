@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/anomalyco/valet-fs/internal/transport"
@@ -124,6 +125,11 @@ type Config struct {
 	// OnPin is called with the peer's key when a daemon accepts one under
 	// trust-on-first-use, so the caller can persist it.
 	OnPin func(pub []byte)
+	// Random supplies the ephemeral key. Nil means crypto/rand, which is what
+	// production uses; it exists so a transcript can be reproduced exactly,
+	// which is how the app's independent implementation is checked against this
+	// one rather than merely against itself.
+	Random io.Reader
 }
 
 // prologue binds the handshake to the protocol name and the session id, so a
@@ -157,6 +163,7 @@ func NewVault(cfg Config) (*Conn, error) {
 	}
 	hs, err := noise.NewHandshakeState(noise.Config{
 		CipherSuite:   suite,
+		Random:        cfg.Random,
 		Pattern:       noise.HandshakeIK,
 		Initiator:     true,
 		Prologue:      prologue(cfg.SessionID),
@@ -176,6 +183,7 @@ func NewVault(cfg Config) (*Conn, error) {
 func NewDaemon(cfg Config) (*Conn, error) {
 	hs, err := noise.NewHandshakeState(noise.Config{
 		CipherSuite:   suite,
+		Random:        cfg.Random,
 		Pattern:       noise.HandshakeIK,
 		Initiator:     false,
 		Prologue:      prologue(cfg.SessionID),
