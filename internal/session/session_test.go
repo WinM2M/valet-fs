@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -231,33 +230,72 @@ func TestReflectedFrameIsRejected(t *testing.T) {
 	}
 }
 
-// A second handshake attempt after the session is up must not take it over.
-func TestSecondHandshakeIsIgnored(t *testing.T) {
-	vk, dk, attacker := mustKey(t), mustKey(t), mustKey(t)
-	_, d, _, dp := establish(t, "sid-1", vk, dk, [][]byte{vk.Public, attacker.Public})
-	before := d.PeerStatic()
+// The daemon's socket to the hub outlives many app connections: every time the
+// phone opens a session screen it starts a fresh handshake. Refusing those meant
+// only the very first connection ever worked, which is what shipped.
+func TestAuthorisedVaultMayHandshakeAgain(t *testing.T) {
+	vk, dk := mustKey(t), mustKey(t)
+	_, d, _, dp := establish(t, "sid-1", vk, dk, [][]byte{vk.Public})
+	if !d.Established() {
+		t.Fatal("first handshake failed")
+	}
 
-	// Build a fresh, valid message 1 from the attacker and inject it.
-	ap, _ := newPipe()
-	av, err := NewVault(Config{Inner: ap, SessionID: "sid-1", Static: attacker, PeerStatic: dk.Public})
+	// The same vault reconnects: a new ephemeral, a new handshake, same identity.
+	second := freshVault(t, "sid-1", vk, dk, dp)
+	if !second.Established() {
+		t.Fatal("a reconnecting vault must be able to handshake again")
+	}
+	if !subtleEqual(d.PeerStatic(), vk.Public) {
+		t.Fatal("the daemon should still know which vault it is talking to")
+	}
+
+	// And the new session actually carries traffic.
+	var got [][]byte
+	d.OnData(func(b []byte) { got = append(got, append([]byte(nil), b...)) })
+	if err := second.Send([]byte(`{"type":"REQ","method":"STATUS"}`)); err != nil {
+		t.Fatalf("send after re-handshake: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("the re-established session did not deliver: %q", got)
+	}
+}
+
+// Allowing re-handshake is safe only because the handshake authenticates. An
+// identity the daemon was not told to accept must not be able to take over a
+// session that is already up.
+func TestUnauthorisedVaultCannotTakeOverAnEstablishedSession(t *testing.T) {
+	vk, dk, attacker := mustKey(t), mustKey(t), mustKey(t)
+	_, d, _, dp := establish(t, "sid-1", vk, dk, [][]byte{vk.Public})
+	if !d.Established() {
+		t.Fatal("first handshake failed")
+	}
+
+	hostile := freshVault(t, "sid-1", attacker, dk, dp)
+	if hostile.Established() {
+		t.Fatal("an unauthorised identity completed a takeover")
+	}
+	if !errors.Is(d.Err(), ErrUnauthorised) {
+		t.Fatalf("want ErrUnauthorised, got %v", d.Err())
+	}
+	if err := hostile.Send([]byte(`{"type":"REQ","method":"PULL"}`)); err == nil {
+		t.Fatal("an unauthorised identity must not be able to send")
+	}
+}
+
+// freshVault opens a new vault-side session against a daemon that is already
+// attached to dp, the way a phone re-entering the session screen does.
+func freshVault(t *testing.T, sid string, vaultKey, daemonKey noise.DHKey, dp *pipe) *Conn {
+	t.Helper()
+	vp := &pipe{}
+	vp.peer, dp.peer = dp, vp
+	v, err := NewVault(Config{Inner: vp, SessionID: sid, Static: vaultKey, PeerStatic: daemonKey.Public})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Nothing answers this pipe, so the handshake never completes; the point is
-	// only to obtain a well-formed message 1 to inject below.
-	actx, acancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer acancel()
-	_ = av.Start(actx)
-	var f frame
-	if err := json.Unmarshal(ap.lastSent(), &f); err != nil {
-		t.Fatal(err)
-	}
-	inject, _ := json.Marshal(frame{NX: "1", M: f.M})
-	_ = dp.peer.Send(inject)
-
-	if !subtleEqual(d.PeerStatic(), before) {
-		t.Fatal("a second handshake replaced the established peer identity")
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = v.Start(ctx)
+	return v
 }
 
 func shortCtx() (context.Context, context.CancelFunc) {

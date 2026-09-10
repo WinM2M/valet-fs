@@ -489,6 +489,27 @@ function otherRole(role: string): string {
  * Everything is parsed rather than prefix-matched, because the sender chooses
  * the key order and any cheaper check is one the forger simply routes around.
  */
+function frameText(message: string | ArrayBuffer): string | null {
+  if (typeof message === "string") return message;
+  try {
+    return new TextDecoder().decode(message);
+  } catch {
+    return null;
+  }
+}
+
+/** True for the keepalive a daemon sends, which the hub answers. */
+export function isKeepalive(message: string | ArrayBuffer): boolean {
+  const text = frameText(message);
+  if (text === null) return false;
+  try {
+    const parsed = JSON.parse(text);
+    return !!parsed && typeof parsed === "object" && parsed.sys === "ka";
+  } catch {
+    return false;
+  }
+}
+
 export function isSystemFrame(message: string | ArrayBuffer): boolean {
   let text: string;
   if (typeof message === "string") {
@@ -728,7 +749,21 @@ export class SessionHub {
 
   // Relay every frame to the other role, except the ones only the hub may send.
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    if (isSystemFrame(message)) return;
+    if (isSystemFrame(message)) {
+      // Answer a keepalive. A daemon's keepalive is write-only otherwise, and a
+      // write to a half-open socket keeps succeeding — so it would believe it
+      // was connected while everything relayed to it vanished. Replying gives
+      // it something to miss. The reply goes back to the sender and is never
+      // relayed onward; peers still cannot speak the hub's language.
+      if (isKeepalive(message)) {
+        try {
+          ws.send(JSON.stringify({ sys: "ka_ack" }));
+        } catch {
+          // socket already gone
+        }
+      }
+      return;
+    }
     const tags = this.state.getTags(ws);
     const role = tags[0] || "";
     for (const p of this.state.getWebSockets(otherRole(role))) {

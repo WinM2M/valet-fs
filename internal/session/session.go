@@ -77,6 +77,10 @@ type Conn struct {
 	// is recorded, and a different one afterwards is refused.
 	authorised [][]byte
 	onPin      func(pub []byte)
+	// cfg is kept so a fresh handshake state can be built when the peer
+	// reconnects. The daemon's socket to the hub outlives many app
+	// connections, and each one is a new handshake.
+	cfg Config
 
 	mu      sync.Mutex
 	hs      *noise.HandshakeState
@@ -194,7 +198,7 @@ func NewDaemon(cfg Config) (*Conn, error) {
 	}
 	c := &Conn{
 		inner: cfg.Inner, initiator: false, sid: cfg.SessionID, hs: hs,
-		authorised: cfg.Authorised, onPin: cfg.OnPin, ready: make(chan struct{}),
+		authorised: cfg.Authorised, onPin: cfg.OnPin, cfg: cfg, ready: make(chan struct{}),
 	}
 	cfg.Inner.OnData(c.handle)
 	return c, nil
@@ -264,13 +268,34 @@ func (c *Conn) readHandshake1(f frame) {
 		return
 	}
 	c.mu.Lock()
-	if c.hs == nil || c.send != nil {
-		// One handshake per connection. A second attempt is somebody trying to
-		// take the channel over, which is exactly the v1 fault this replaces.
-		c.mu.Unlock()
-		return
+	if c.hs == nil {
+		// A previous handshake finished on this connection. That is the normal
+		// case, not an attack: this daemon's socket to the hub outlives many app
+		// connections, and every time the phone opens a session screen it starts
+		// a fresh one. Refusing here meant only the first ever connection worked.
+		//
+		// Allowing it is safe precisely because the handshake authenticates: an
+		// unauthorised vault cannot complete one, and authorise() runs again
+		// below on whatever identity this handshake reveals.
+		fresh, err := noise.NewHandshakeState(noise.Config{
+			CipherSuite:   suite,
+			Random:        c.cfg.Random,
+			Pattern:       noise.HandshakeIK,
+			Initiator:     false,
+			Prologue:      prologue(c.sid),
+			StaticKeypair: c.cfg.Static,
+		})
+		if err != nil {
+			c.mu.Unlock()
+			return
+		}
+		c.hs = fresh
+		c.send, c.recv = nil, nil
 	}
 	if _, _, _, err := c.hs.ReadMessage(nil, msg); err != nil {
+		// A failed read leaves the state unusable; drop it so the next attempt
+		// starts clean rather than compounding on a half-consumed handshake.
+		c.hs = nil
 		c.mu.Unlock()
 		return
 	}

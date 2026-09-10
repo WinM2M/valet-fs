@@ -76,7 +76,21 @@ type Conn struct {
 	started   bool
 	done      chan struct{}
 	closeOnce sync.Once
+	// lastRead is when a frame last arrived. The keepalive below only writes,
+	// and a write to a half-open socket keeps succeeding, so without watching
+	// what comes back a daemon can believe it is connected indefinitely while
+	// every frame relayed to it disappears. That is not hypothetical: a hub
+	// redeploy severed the link twice, and the second time no close ever
+	// reached the daemon — it sat there holding secrets nobody could get to,
+	// with the hub still reporting it online.
+	lastRead time.Time
 }
+
+// readSilenceLimit is how long the hub may say nothing before this connection is
+// treated as dead. The hub relays presence and the peer's traffic, and the
+// keepalive round trip below guarantees something well inside this window; a
+// gap this long means the socket is not really there.
+const readSilenceLimit = 90 * time.Second
 
 // OnData registers the inbound-frame callback.
 func (c *Conn) OnData(f func([]byte)) { c.mu.Lock(); c.onData = f; c.mu.Unlock() }
@@ -115,6 +129,16 @@ func (c *Conn) keepalive() {
 			if err := websocket.Message.Send(c.ws, []byte(`{"sys":"ka"}`)); err != nil {
 				return
 			}
+			// A successful write proves nothing about the far end. Silence for
+			// longer than the limit does: tear the socket down so the reconnect
+			// path runs instead of waiting for a close that will never come.
+			c.mu.Lock()
+			silent := time.Since(c.lastRead)
+			c.mu.Unlock()
+			if silent > readSilenceLimit {
+				_ = c.ws.Close() // unblocks readLoop, which fires OnClose
+				return
+			}
 		}
 	}
 }
@@ -127,6 +151,9 @@ func (c *Conn) Start() {
 		return
 	}
 	c.started = true
+	// Count the silence from the moment the socket starts, not from the zero
+	// time, or the first keepalive tick would declare it dead immediately.
+	c.lastRead = time.Now()
 	onOpen := c.onOpen
 	c.mu.Unlock()
 	if onOpen != nil {
@@ -150,6 +177,7 @@ func (c *Conn) readLoop() {
 			return
 		}
 		c.mu.Lock()
+		c.lastRead = time.Now()
 		onData := c.onData
 		c.mu.Unlock()
 		if onData != nil {

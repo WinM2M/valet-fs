@@ -213,6 +213,12 @@ func (s *Server) handleWS(ws *websocket.Conn) {
 			return
 		}
 		if isSystemFrame(data) {
+			// Answer a keepalive so the sender can tell a live socket from a
+			// half-open one; a write alone proves nothing. The reply goes back
+			// to the sender, never onward to the peer.
+			if isKeepalive(data) {
+				_ = websocket.Message.Send(ws, []byte(`{"sys":"ka_ack"}`))
+			}
 			continue
 		}
 		sess.mu.Lock()
@@ -232,6 +238,14 @@ func (s *Server) handleWS(ws *websocket.Conn) {
 // The rule is "carries a sys key at all", not "carries a sys string". Anything
 // looser invites a bypass hunt, and the Cloudflare hub applies the same rule, so
 // the two implementations cannot drift into disagreeing about a frame.
+// isKeepalive reports the frame a daemon sends to keep the socket warm.
+func isKeepalive(data []byte) bool {
+	var probe struct {
+		Sys string `json:"sys"`
+	}
+	return json.Unmarshal(data, &probe) == nil && probe.Sys == "ka"
+}
+
 func isSystemFrame(data []byte) bool {
 	var probe map[string]json.RawMessage
 	if json.Unmarshal(data, &probe) != nil {

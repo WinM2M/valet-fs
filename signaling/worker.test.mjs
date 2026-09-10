@@ -123,7 +123,7 @@ await test("tokenEqual rejects mismatched and empty inputs", () => {
 
 // --- presence forgery -----------------------------------------------------
 
-import { isSystemFrame } from "./worker.ts";
+import { isKeepalive, isSystemFrame } from "./worker.ts";
 
 await test("forged presence frames are never relayed", async () => {
   const forged = [
@@ -277,6 +277,28 @@ await test("a newer socket replaces an older one for the same role", async () =>
   const daemonToken = await st.storage.get("daemon_token");
   await assert.rejects(() => connect("daemon", daemonToken), /WebSocketPair/);
   assert.strictEqual(closed, 0, "attaching one role must not close the other's socket");
+});
+
+// A daemon's keepalive is write-only, and a write to a half-open socket keeps
+// succeeding — so it would believe it was connected while everything relayed to
+// it vanished. Answering gives it something to miss.
+await test("the hub answers a keepalive and relays nothing onward", async () => {
+  assert.ok(isKeepalive('{"sys":"ka"}'));
+  assert.ok(isKeepalive(new TextEncoder().encode('{"sys":"ka"}').buffer));
+  for (const not of ['{"sys":"peer_online","role":"vault"}', '{"enc":"x"}', "nope", '{"sys":"kax"}']) {
+    assert.ok(!isKeepalive(not), `should not be a keepalive: ${not}`);
+  }
+
+  const st = fakeState();
+  const relayed = [];
+  st.getWebSockets = (role) => (role === "vault" ? [{ send: (m) => relayed.push(m) }] : []);
+  st.getTags = () => ["daemon"];
+  const hub = new SessionHub(st);
+
+  const answers = [];
+  await hub.webSocketMessage({ send: (m) => answers.push(m) }, '{"sys":"ka"}');
+  assert.deepStrictEqual(answers, ['{"sys":"ka_ack"}'], "the sender must get an answer");
+  assert.strictEqual(relayed.length, 0, "a keepalive must never reach the peer");
 });
 
 console.log(`\nSessionHub: ${passed}/${passed} 통과`);
