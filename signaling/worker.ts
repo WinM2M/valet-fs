@@ -689,10 +689,21 @@ export class SessionHub {
       if (!want || token !== want) {
         return new Response("forbidden", { status: 403 });
       }
-      // One socket per role. Without this a second claimant could sit alongside
-      // the real vault and receive every reply the daemon sends.
-      if (this.state.getWebSockets(role).length > 0) {
-        return new Response("role already connected", { status: 409 });
+      // One socket per role, with the newest winning rather than the oldest.
+      //
+      // Refusing the newcomer looked safer and was not. A phone that loses
+      // signal, or is backgrounded before it can close cleanly, leaves a socket
+      // the hub still counts — and then blocks its own return, which is what a
+      // user sees as a session that will not connect. The thing that stops an
+      // impostor taking the vault role is the claim secret, not this; by the
+      // time execution reaches here the caller has already proved it holds the
+      // role token.
+      for (const stale of this.state.getWebSockets(role)) {
+        try {
+          stale.close(1000, "replaced by a newer connection");
+        } catch {
+          // already gone
+        }
       }
       const pair = new WebSocketPair();
       const client = pair[0];

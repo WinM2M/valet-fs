@@ -251,7 +251,7 @@ await test("a legacy session with no claim secret still claims", async () => {
   assert.strictEqual((await hub.fetch(claimReq())).status, 200);
 });
 
-await test("a second socket for a role is refused", async () => {
+await test("a newer socket replaces an older one for the same role", async () => {
   const st = fakeState();
   const hub = new SessionHub(st);
   await create(hub, "PUB", [1], SECRET);
@@ -260,23 +260,23 @@ await test("a second socket for a role is refused", async () => {
   const connect = (role, token) => hub.fetch(new Request(
     `https://do/?do=connect&role=${role}&token=${token}`, { method: "GET" }));
 
-  // A vault is already attached. Without this guard someone who obtained the
-  // secret could sit alongside the real one and receive every reply the daemon
-  // sends, which is the difference between "they can talk to my daemon" and
-  // "they can read everything I push to it".
-  st.getWebSockets = (role) => (role === "vault" ? [{}] : []);
-  assert.strictEqual((await connect("vault", controller_token)).status, 409);
-
-  // The guard is per role, not global: a daemon may still attach. Getting past
-  // it lands on WebSocketPair, which only exists inside the Workers runtime, so
-  // reaching that is the evidence — the guard did not stop it. Accepting an
-  // actual socket is covered by the Go hub's integration tests.
-  const daemonToken = await st.storage.get("daemon_token");
+  // A stale vault socket must not block the real phone's return. Refusing the
+  // newcomer meant a handset that lost signal locked itself out of its own
+  // vault; the claim secret is what keeps an impostor out of this role.
+  let closed = 0;
+  st.getWebSockets = (role) => (role === "vault" ? [{ close: () => { closed += 1; } }] : []);
   await assert.rejects(
-    () => connect("daemon", daemonToken),
+    () => connect("vault", controller_token),
     /WebSocketPair/,
-    "the other role must get past the guard",
+    "a second vault connection must proceed, not be refused",
   );
+  assert.strictEqual(closed, 1, "the stale socket must be closed, not left to linger");
+
+  // Per role, not global: a daemon attaching must not disturb the vault.
+  closed = 0;
+  const daemonToken = await st.storage.get("daemon_token");
+  await assert.rejects(() => connect("daemon", daemonToken), /WebSocketPair/);
+  assert.strictEqual(closed, 0, "attaching one role must not close the other's socket");
 });
 
 console.log(`\nSessionHub: ${passed}/${passed} 통과`);
