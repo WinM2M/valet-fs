@@ -95,26 +95,31 @@ type sysFrame struct {
 }
 
 func (n *MemoryNode) onData(b []byte) {
-	// Presence/system frames originate from the hub, not the peer.
+	// Presence frames are plaintext and come from the hub, so they may only ever
+	// make this daemon MORE locked, never less.
+	//
+	// peer_offline arms the countdown. If that were ever forged the worst case
+	// is an unnecessary lock, which is an inconvenience, not a breach.
+	//
+	// peer_online used to cancel it, and that is the dangerous direction: a
+	// hostile hub could hold a daemon unlocked indefinitely by repeating it, so
+	// the guarantee that secrets go when the phone goes away would rest on an
+	// unauthenticated channel. Cancelling is now driven only by real traffic
+	// from the peer, below.
 	var sys sysFrame
 	if json.Unmarshal(b, &sys) == nil && sys.Sys != "" {
-		if sys.Role == "vault" {
-			switch sys.Sys {
-			case "peer_offline":
-				n.startGrace()
-			case "peer_online":
-				n.cancelGrace()
-			}
+		if sys.Role == "vault" && sys.Sys == "peer_offline" {
+			n.startGrace()
 		}
 		return
 	}
-	// A non-sys frame is a real RPC from the vault peer, which proves it is
-	// connected right now. Cancel any pending grace even if the hub's
-	// peer_online presence frame was missed/never relayed (wrong session, role
-	// mismatch, or a hub blip). Without this, a secret pushed by an actively
-	// connected app could be wiped ~grace later purely because presence frames
-	// are a separate, unreliable channel. Presence still (re)arms grace on
-	// peer_offline, so "app went away -> lock" is unchanged.
+	// A non-sys frame is a real request from the peer, which proves it is
+	// connected right now — and under E2EE it also proves the sender holds the
+	// session key, because anything else fails to decrypt before reaching here.
+	// That is the only evidence allowed to cancel the countdown.
+	//
+	// (Without E2EE the frame is merely plaintext from whoever is in the
+	// session. v2 makes the authenticated channel mandatory and closes that.)
 	n.cancelGrace()
 	reply, isReq := n.disp.Dispatch(b)
 	if isReq && reply != nil {
@@ -273,6 +278,11 @@ func (n *MemoryNode) register() {
 			"version":       fs.Version(),
 			"grace_seconds": int64(graceCfg / time.Second),
 			"grace_armed":   graceArmed,
+			// Repeated here on purpose. The client also learns this list from
+			// the hub's claim response, which the hub could have edited to push
+			// the session onto an older protocol. This copy arrives over the
+			// encrypted channel, so the two disagreeing means the hub lied.
+			"protocol_versions": rpc.Supported,
 		}
 		if graceArmed {
 			res["grace_remaining_seconds"] = int64(graceLeft / time.Second)

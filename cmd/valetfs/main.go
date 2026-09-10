@@ -30,7 +30,9 @@ import (
 	"github.com/anomalyco/valet-fs/internal/config"
 	"github.com/anomalyco/valet-fs/internal/daemon"
 	"github.com/anomalyco/valet-fs/internal/e2ee"
+	"github.com/anomalyco/valet-fs/internal/hardening"
 	"github.com/anomalyco/valet-fs/internal/node"
+	"github.com/anomalyco/valet-fs/internal/session"
 	"github.com/anomalyco/valet-fs/internal/transport/ws"
 	"github.com/anomalyco/valet-fs/internal/vfs"
 	"github.com/anomalyco/valet-fs/internal/webrtc"
@@ -44,7 +46,7 @@ type runtimeState struct {
 
 var cliVerbose bool
 
-const cliVersion = "0.1.9"
+const cliVersion = "0.2.0"
 
 // joinKey is the app-provisioned connection key decoded by `serve --join`.
 type joinKey struct {
@@ -52,6 +54,13 @@ type joinKey struct {
 	SID       string `json:"sid"`
 	Token     string `json:"token"`
 	Signaling string `json:"signaling"`
+	// VaultPub is the app's long-lived Noise identity. Its presence is what
+	// makes the reverse flow authenticated rather than trust-on-first-use: the
+	// key travels inside a connection key the user physically carries, so the
+	// daemon learns who to accept without having to believe the hub.
+	VaultPub string `json:"vault_pub,omitempty"`
+	// Claim authorises claiming the session on the hub.
+	Claim string `json:"claim,omitempty"`
 }
 
 // decodeJoinKey parses a base64url (or std base64) JSON connection key.
@@ -97,6 +106,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "vaults":
+			if err := runVaults(os.Args[2:]); err != nil {
+				_, _ = fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		case "stop", "status", "ls", "cat", "cp", "rm", "del", "mkdir", "rmdir", "mv", "completion", "__complete":
 			if err := runCLI(os.Args[1:]); err != nil {
 				_, _ = fmt.Fprintln(os.Stderr, err)
@@ -105,7 +120,7 @@ func main() {
 			return
 		}
 	}
-	_, _ = fmt.Fprintln(os.Stderr, "usage: valetfs serve [options] | valetfs vault <subcommand> | valetfs <command>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: valetfs serve [options] | valetfs vault <subcommand> | valetfs vaults <list|forget> | valetfs <command>")
 	os.Exit(1)
 }
 
@@ -129,6 +144,20 @@ func serve(args []string) {
 			_, _ = fmt.Fprintln(os.Stderr, "Daemon is already running. Use `valetfs stop` to stop the existing daemon.")
 			os.Exit(1)
 		}
+	}
+
+	// Before any secret can exist in this process: keep its memory out of swap
+	// and out of core dumps, and refuse same-uid ptrace. Wiping the heap on lock
+	// only covers secrets that are already meant to be gone.
+	hr := hardening.Apply()
+	if hr.MemoryLocked && hr.DumpsDisabled {
+		log.Println("valetfs: memory locked; core dumps and same-uid ptrace disabled")
+	} else {
+		log.Printf("valetfs: process hardening incomplete (memory_locked=%t dumps_disabled=%t)",
+			hr.MemoryLocked, hr.DumpsDisabled)
+	}
+	for _, note := range hr.Notes {
+		log.Printf("valetfs: %s", note)
 	}
 
 	// Phase 3 rule 1: idempotent ghost-unmount before we touch the mountpoint.
@@ -164,6 +193,9 @@ func serve(args []string) {
 		log.Println("valetd: starting in DEV mode (no WebRTC)")
 	} else if cfg.Transport == "ws" {
 		log.Println("valetd: starting in PRODUCTION mode (ws transport)")
+		// Applies to the signaling URL from config and to the one carried inside
+		// a --join key, which is supplied by whoever wrote that key.
+		ws.SetAllowInsecure(cfg.InsecureSignaling)
 		var kp *e2ee.KeyPair
 		var err error
 		if cfg.ResumeKeyFile != "" {
@@ -178,8 +210,29 @@ func serve(args []string) {
 		} else if kp, err = e2ee.Generate(); err != nil {
 			log.Fatalf("valetd: e2ee keygen: %v", err)
 		}
+
+		// The v2 identity is a separate key in a separate file. Same curve as the
+		// v1 one, which is what makes sharing tempting; sharing would mean a flaw
+		// in either protocol is not confined to that protocol.
+		noiseKeyPath := ""
+		if cfg.ResumeKeyFile != "" {
+			noiseKeyPath = cfg.ResumeKeyFile + ".noise"
+		}
+		staticKey, reusedStatic, err := session.LoadOrGenerateStatic(noiseKeyPath)
+		if err != nil {
+			log.Fatalf("valetd: noise key file: %v", err)
+		}
+		if reusedStatic {
+			log.Println("valetd: reusing the persisted v2 identity")
+		}
+
+		authorized, err := session.OpenAuthorizedVaults(cfg.AuthorizedVaultsFile)
+		if err != nil {
+			log.Fatalf("valetd: authorized vaults: %v", err)
+		}
 		var rawConn *ws.Conn
 		var sid, daemonToken, signaling string
+		var joinAuthorized [][]byte
 		if cfg.JoinKey != "" {
 			// Reverse flow: the app pre-created the session; join it as the daemon.
 			key, err := decodeJoinKey(cfg.JoinKey)
@@ -191,7 +244,19 @@ func serve(args []string) {
 			if signaling == "" {
 				signaling = cfg.SignalingURL
 			}
-			if err := ws.PublishPub(signaling, sid, daemonToken, kp.PubB64()); err != nil {
+			// A connection key that names its vault authorises exactly that one.
+			// This is the reverse flow's advantage over the QR flow: the user
+			// carried the key here, so nothing has to be taken on trust from the
+			// hub, and there is no first-contact window to get wrong.
+			if key.VaultPub != "" {
+				pub, perr := session.ParsePub(key.VaultPub)
+				if perr != nil {
+					log.Fatalf("valetd: invalid vault key in --join: %v", perr)
+				}
+				joinAuthorized = [][]byte{pub}
+				log.Println("valetd: the connection key names its vault; only that identity is accepted")
+			}
+			if err := ws.PublishPub(signaling, sid, daemonToken, kp.PubB64(), session.PubB64(staticKey.Public)); err != nil {
 				log.Fatalf("valetd: publish pubkey: %v", err)
 			}
 			rawConn, err = ws.JoinDaemon(signaling, sid, daemonToken)
@@ -202,20 +267,33 @@ func serve(args []string) {
 			fmt.Println("The ValetFS app can now push secrets and control this daemon (E2EE).")
 		} else {
 			signaling = cfg.SignalingURL
-			var err error
-			rawConn, sid, err = ws.DialDaemon(signaling, kp.PubB64())
+			claimSecret, err := ws.NewClaimSecret()
+			if err != nil {
+				log.Fatalf("valetd: claim secret: %v", err)
+			}
+			rawConn, sid, err = ws.DialDaemon(signaling, kp.PubB64(), session.PubB64(staticKey.Public), claimSecret)
 			if err != nil {
 				log.Fatalf("valetd: ws dial: %v", err)
 			}
 			daemonToken = rawConn.Token()
-			// QR payload carries the E2EE public key (authenticated out-of-band by
-			// the scan), the session id, and the signaling URL.
+			// The QR carries the E2EE public key (authenticated out of band by the
+			// scan), the session id, the signaling URL — and the claim secret.
+			//
+			// The secret is in the QR and NOWHERE ELSE. Printing it as text, the
+			// way the session id is printed below, would put it in scrollback,
+			// log files, CI output and an agent's transcript, and the point of it
+			// is that the only practical way to obtain it is to look at this
+			// screen. That is what turns "I am standing in front of this machine"
+			// into something the daemon can act on rather than something only the
+			// person holding the phone knows.
 			qrPayload, _ := json.Marshal(map[string]any{
 				"v": 1, "sid": sid, "signaling": signaling, "pub": kp.PubB64(),
+				"pub2": session.PubB64(staticKey.Public), "claim": claimSecret,
 			})
 			qrterminal.GenerateHalfBlock(string(qrPayload), qrterminal.L, os.Stdout)
 			fmt.Printf("Session ID: %s\n", sid)
 			fmt.Println("Scan with the ValetFS mobile app to pair (E2EE).")
+			fmt.Println("The QR carries a one-time claim secret; typing the session ID alone will not pair.")
 		}
 		n := node.New(node.Config{
 			FS:    d.MemFS(),
@@ -224,6 +302,7 @@ func serve(args []string) {
 				log.Println("valetd: auto-lock (grace expired / remote lock); unmounting + wiping")
 				_ = d.Unmount()
 				d.MemFS().Wipe()
+				_ = d.WipeHistory()
 			},
 			Mounted: d.Mounted,
 			// UNMOUNT stops serving but keeps the heap; Remount re-serves on the
@@ -269,15 +348,50 @@ func serve(args []string) {
 			log.Println("valetd: control plane lost (session gone); self-locking (unmount + wipe)")
 			_ = d.Unmount()
 			d.MemFS().Wipe()
+			_ = d.WipeHistory()
 		}
 		attach = func(raw *ws.Conn) {
-			ec := e2ee.WrapDaemon(raw, kp)
-			n.Attach(ec)
-			ec.OnClose(func() {
+			// Which version this becomes is decided by the first frame the peer
+			// sends, not by anything agreed beforehand. Serving v1 as well is
+			// what keeps the shipped app working while v2 rolls out.
+			auth := joinAuthorized
+			if auth == nil {
+				auth = authorized.Keys()
+			}
+			dc := session.NewDual(session.DualConfig{
+				Inner:    raw,
+				V1Static: kp,
+				V2: session.Config{
+					SessionID:  sid,
+					Static:     staticKey,
+					Authorised: auth,
+					OnPin: func(pub []byte) {
+						// Trust on first use, and only when nothing was
+						// authorised: record it so a restart is not another
+						// first contact.
+						if err := authorized.Add(pub, session.DefaultLabel(time.Now())); err != nil {
+							log.Printf("valetd: could not record the vault identity: %v", err)
+							return
+						}
+						log.Printf("valetd: pinned vault identity %s (edit %s to change)",
+							session.PubB64(pub), cfg.AuthorizedVaultsFile)
+					},
+				},
+				OnChoose: func(v int) {
+					if v == 1 {
+						log.Println("valetd: peer opened a v1 session (unauthenticated controller); " +
+							"upgrade the app to get an authenticated one")
+						return
+					}
+					log.Println("valetd: peer opened a v2 session (mutually authenticated)")
+				},
+			})
+			n.Attach(dc)
+			dc.OnClose(func() {
 				log.Println("valetd: ws connection closed; attempting reconnect")
 				go reconnect()
 			})
-			ec.Start()
+			dc.Start()
 		}
 		attach(rawConn)
 		if cfg.JoinKey != "" {
@@ -305,6 +419,7 @@ func serve(args []string) {
 						log.Printf("valetd: unmount error from remote rpc: %v", err)
 					}
 					d.MemFS().Wipe()
+					_ = d.WipeHistory()
 				case "WRITE":
 					p, _ := rpc.Params["path"].(string)
 					content, _ := rpc.Params["content"].(string)
@@ -346,6 +461,7 @@ func serve(args []string) {
 					log.Printf("valetd: unmount error from remote command: %v", err)
 				}
 				d.MemFS().Wipe()
+				_ = d.WipeHistory()
 			case "WRITE":
 				p, _ := c.Payload["path"].(string)
 				content, _ := c.Payload["content"].(string)
@@ -419,7 +535,7 @@ func runCLI(args []string) error {
 			return fmt.Errorf("usage: valetd cat <fs-path>")
 		}
 		if isHostPath(args[1]) {
-			return fmt.Errorf("cat only handles fs paths, host path is not supported: %s", args[1])
+			return hintVaultPath("cat", args[1])
 		}
 		q := url.Values{"path": []string{toFSPathArg(args[1])}}
 		resp, err := apiReq(client, base, st.ControlToken, http.MethodGet, "/files", q, nil)
@@ -515,7 +631,7 @@ func runLS(client *http.Client, base, token string, args []string) error {
 	p := "/"
 	if fs.NArg() > 0 {
 		if isHostPath(fs.Arg(0)) {
-			return fmt.Errorf("ls only handles fs paths, host path is not supported: %s", fs.Arg(0))
+			return hintVaultPath("ls", fs.Arg(0))
 		}
 		p = toFSPathArg(fs.Arg(0))
 	}
@@ -661,7 +777,20 @@ func runCP(client *http.Client, base, token string, args []string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(dst, data, 0o600)
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			return err
+		}
+		// Say it out loud. The point of this program is to keep secrets off
+		// disk, and this is the one command that puts them back; doing it
+		// silently means a mistyped path leaks without anyone noticing.
+		_, _ = fmt.Fprintf(os.Stderr,
+			"note: wrote the secret at %s to disk at %s (%d bytes). "+
+				"Remove it when you are done.\n", srcFSPath, dst, len(data))
+		return nil
+	}
+	if looksLikeVaultPath(src) {
+		return fmt.Errorf("cp needs an fs: path. %s is a host path and does not exist here. "+
+			"Did you mean fs:%s ?", src, src)
 	}
 	return errors.New("cp requires at least one fs: path")
 }
@@ -680,7 +809,7 @@ func runRM(client *http.Client, base, token string, args []string) error {
 	}
 	p := fs.Arg(0)
 	if isHostPath(p) {
-		return fmt.Errorf("rm only handles fs paths, host path is not supported: %s", p)
+		return hintVaultPath("rm", p)
 	}
 	if !*recursive {
 		isDir, err := fsPathIsDirWithErr(client, base, token, toFSPathArg(p))
@@ -893,15 +1022,15 @@ func fsPathExists(client *http.Client, base, token, p string) bool {
 func apiReq(client *http.Client, base, token, method, path string, q url.Values, body io.Reader) (*http.Response, error) {
 	u := base + path
 	if q != nil {
-		q.Set("token", token)
 		u += "?" + q.Encode()
-	} else {
-		u += "?token=" + url.QueryEscape(token)
 	}
 	req, err := http.NewRequest(method, u, body)
 	if err != nil {
 		return nil, err
 	}
+	// Header, not query string: URLs leak into proxy logs, shell history and
+	// process listings in a way headers do not.
+	req.Header.Set("X-Valet-Token", token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -920,11 +1049,40 @@ func apiReq(client *http.Client, base, token, method, path string, q url.Values,
 	return resp, nil
 }
 
+// isHostPath decides whether an argument names a file on this machine or a path
+// inside the vault. An absolute path is a host path: "fs:" is what marks the
+// vault. That is a coin toss for something like /keys/aws.env, which reads as a
+// vault path to a human and as a host path to this function, so callers pair it
+// with hintVaultPath to explain the mismatch rather than failing opaquely.
 func isHostPath(p string) bool {
 	if strings.HasPrefix(p, "fs:") {
 		return false
 	}
 	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../")
+}
+
+// looksLikeVaultPath reports whether a host path resembles something the user
+// probably meant to address inside the vault. Deliberately narrow: an absolute
+// path that does not exist on this machine is far more likely a vault path typed
+// without the prefix than a real file.
+func looksLikeVaultPath(p string) bool {
+	if !strings.HasPrefix(p, "/") {
+		return false
+	}
+	if _, err := os.Stat(p); err == nil {
+		return false // it exists here, so take it at face value
+	}
+	return true
+}
+
+// hintVaultPath returns an error that names the likely fix, instead of leaving
+// the user to guess which of two path spaces the command was talking about.
+func hintVaultPath(cmd, p string) error {
+	if looksLikeVaultPath(p) {
+		return fmt.Errorf("%s only handles fs paths: %s is a host path and does not exist here. "+
+			"Did you mean fs:%s ?", cmd, p, p)
+	}
+	return fmt.Errorf("%s only handles fs paths, host path is not supported: %s", cmd, p)
 }
 
 func toFSPathArg(p string) string {
@@ -1043,4 +1201,81 @@ func expandCombinedFlags(args []string, allowed string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// runVaults manages the identities this daemon accepts. It is the hands-on
+// recovery path: if the phone holding a vault identity is lost or replaced, the
+// pin is removed here, on the machine, where having access is itself the proof
+// of authority.
+func runVaults(args []string) error {
+	fs := flag.NewFlagSet("vaults", flag.ContinueOnError)
+	path := fs.String("authorized-vaults", defaultAuthorizedVaultsPath(), "authorized vaults file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: valetfs vaults <list|forget <pubkey>|forget-all>")
+	}
+	av, err := session.OpenAuthorizedVaults(*path)
+	if err != nil {
+		return err
+	}
+
+	switch rest[0] {
+	case "list":
+		entries := av.List()
+		if len(entries) == 0 {
+			_, _ = fmt.Fprintf(os.Stdout,
+				"No vault identities pinned (%s).\nThe next vault to connect will be trusted and recorded.\n", *path)
+			return nil
+		}
+		for _, e := range entries {
+			_, _ = fmt.Fprintln(os.Stdout, e)
+		}
+		return nil
+
+	case "forget":
+		if len(rest) < 2 {
+			return fmt.Errorf("usage: valetfs vaults forget <pubkey>")
+		}
+		pub, err := session.ParsePub(rest[1])
+		if err != nil {
+			return err
+		}
+		removed, err := av.Remove(pub)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			return fmt.Errorf("that key was not pinned")
+		}
+		_, _ = fmt.Fprintln(os.Stdout, "un-pinned. Restart the daemon for it to take effect.")
+		return nil
+
+	case "forget-all":
+		for _, line := range av.List() {
+			pub, err := session.ParsePub(strings.Fields(line)[0])
+			if err != nil {
+				return err
+			}
+			if _, err := av.Remove(pub); err != nil {
+				return err
+			}
+		}
+		_, _ = fmt.Fprintf(os.Stdout,
+			"All identities un-pinned. The next vault to connect will be trusted and recorded.\n")
+		return nil
+	}
+	return fmt.Errorf("unknown subcommand %q", rest[0])
+}
+
+func defaultAuthorizedVaultsPath() string {
+	if v := os.Getenv("VALETFS_AUTHORIZED_VAULTS"); v != "" {
+		return v
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".valetfs", "authorized_vaults")
+	}
+	return "/tmp/valetfs-authorized_vaults"
 }

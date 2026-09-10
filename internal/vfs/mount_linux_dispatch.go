@@ -67,7 +67,7 @@ func tryEnableFUSE() {
 // prefers a real FUSE mount (transparent to the user's tools) but seamlessly
 // falls back to an in-process WebDAV server when FUSE is unavailable, so the
 // user never has to run modprobe, install drivers, or escalate privileges.
-func NewMounter(m *MemFS) Mounter {
+func NewMounter(m *MemFS, token string, allowRemote bool) Mounter {
 	avail := checkFUSE()
 	if !avail.OK {
 		// Attempt one self-healing pass before giving up.
@@ -78,8 +78,10 @@ func NewMounter(m *MemFS) Mounter {
 		return &fuseMounter{fs: m}
 	}
 	log.Printf("valetfs: FUSE unavailable (%s); falling back to loopback WebDAV", avail.Reason)
-	log.Printf("valetfs: agents and `curl` can access files at http://<webdav-addr>/")
-	return &fallbackMounter{inner: NewWebdavMounter(m, "127.0.0.1:0")}
+	log.Printf("valetfs: agents and `curl` can access files at http://<webdav-addr>/ " +
+		"(authenticated: use the control token as the HTTP Basic password, a Bearer " +
+		"header, or ?token=; read it from runtime.json)")
+	return &fallbackMounter{inner: NewWebdavMounter(m, "127.0.0.1:0", token, allowRemote)}
 }
 
 // PreUnmount forcefully detaches any ghost FUSE mount left over from a

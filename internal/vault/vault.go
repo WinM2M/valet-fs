@@ -18,11 +18,17 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+// LegacyDefaultPassphrase is what this program used to fall back to when no
+// passphrase was configured. It is published in the source, so every vault
+// still encrypted with it is readable by anyone who obtains the directory. It
+// survives here for one purpose: opening such a vault long enough to rekey it.
+// Never use it to encrypt anything new.
+const LegacyDefaultPassphrase = "valetfs-default-dev-passphrase"
+
+// passphraseProvider resolves the vault passphrase. It deliberately has no
+// built-in fallback: a default that ships in public source is not a secret.
 var passphraseProvider = func() string {
-	if p := os.Getenv("VALETFS_VAULT_PASSWORD"); p != "" {
-		return p
-	}
-	return "valetfs-default-dev-passphrase"
+	return os.Getenv("VALETFS_VAULT_PASSWORD")
 }
 
 // SetPassphraseProvider overrides passphrase source for vault encryption.
@@ -47,17 +53,102 @@ type Manifest struct {
 type Vault struct {
 	Dir string
 	mf  Manifest
+
+	// pass is the passphrase actually in force for this handle, resolved once
+	// at Open. Resolving per operation would let the effective key change
+	// underneath a half-finished rekey.
+	pass string
+	// legacy records that the vault only opened under LegacyDefaultPassphrase,
+	// i.e. its contents are protected by a value anyone can read on GitHub.
+	legacy bool
+	// unprotected records that the passphrase is empty, so the key is derived
+	// from the salt alone and the directory decrypts itself.
+	unprotected bool
+	// saltOverride lets Rekey encrypt under a new salt before that salt is
+	// committed to disk.
+	saltOverride []byte
 }
 
 func Open(dir string) (*Vault, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "blobs"), 0o700); err != nil {
 		return nil, err
 	}
-	v := &Vault{Dir: dir, mf: Manifest{Entries: map[string]Entry{}}}
+	v := &Vault{Dir: dir, mf: Manifest{Entries: map[string]Entry{}}, pass: passphraseProvider()}
 	if err := v.loadManifest(); err != nil {
-		return nil, err
+		// The configured passphrase did not open it. Before giving up, try the
+		// passphrase older builds used silently, so an affected vault can still
+		// be read and rekeyed instead of being stranded.
+		probe := &Vault{Dir: dir, mf: Manifest{Entries: map[string]Entry{}}, pass: LegacyDefaultPassphrase}
+		if probe.loadManifest() != nil {
+			// "message authentication failed" is what a wrong key looks like at
+			// the cipher layer; say what it means instead.
+			if v.pass == "" {
+				return nil, fmt.Errorf("vault %s: no passphrase given, and the vault is not "+
+					"readable without one (set VALETFS_VAULT_PASSWORD or pass --password-file)", dir)
+			}
+			return nil, fmt.Errorf("vault %s: wrong passphrase", dir)
+		}
+		probe.legacy = true
+		v = probe
+	} else if v.pass == LegacyDefaultPassphrase {
+		v.legacy = true
 	}
+	v.unprotected = v.pass == ""
 	return v, nil
+}
+
+// UsesLegacyPassphrase reports that this vault is encrypted with the passphrase
+// published in the source. Callers must warn loudly and steer the user to Rekey.
+func (v *Vault) UsesLegacyPassphrase() bool { return v.legacy }
+
+// IsUnprotected reports that no passphrase is in force, so the key derives from
+// the stored salt alone and the directory decrypts itself.
+func (v *Vault) IsUnprotected() bool { return v.unprotected }
+
+// Rekey re-encrypts every blob and the manifest under a new passphrase and a
+// fresh salt. It writes the new blobs before swapping the salt, so an
+// interrupted rekey leaves the old vault readable rather than half-converted.
+func (v *Vault) Rekey(newPass string) error {
+	if newPass == "" {
+		return fmt.Errorf("rekey: refusing to rekey to an empty passphrase")
+	}
+	if newPass == LegacyDefaultPassphrase {
+		return fmt.Errorf("rekey: that passphrase is published in the source; choose another")
+	}
+
+	// Read everything under the current key first.
+	plain := make(map[string][]byte, len(v.mf.Entries))
+	for path := range v.mf.Entries {
+		b, err := v.Read(path)
+		if err != nil {
+			return fmt.Errorf("rekey: read %s: %w", path, err)
+		}
+		plain[path] = b
+	}
+
+	newSalt := make([]byte, 16)
+	if _, err := rand.Read(newSalt); err != nil {
+		return err
+	}
+	next := &Vault{Dir: v.Dir, mf: v.mf, pass: newPass, saltOverride: newSalt}
+
+	for path, body := range plain {
+		e := v.mf.Entries[path]
+		enc, err := next.encrypt(body)
+		if err != nil {
+			return fmt.Errorf("rekey: encrypt %s: %w", path, err)
+		}
+		if err := os.WriteFile(filepath.Join(v.Dir, "blobs", e.BlobSHA+".bin"), enc, 0o600); err != nil {
+			return fmt.Errorf("rekey: write %s: %w", path, err)
+		}
+	}
+
+	// Commit: the salt is what makes the new blobs readable, so it lands last.
+	if err := os.WriteFile(filepath.Join(v.Dir, "salt.bin"), newSalt, 0o600); err != nil {
+		return fmt.Errorf("rekey: write salt: %w", err)
+	}
+	v.pass, v.legacy, v.unprotected, v.saltOverride = newPass, false, false, newSalt
+	return v.saveManifest()
 }
 
 func (v *Vault) Add(hostPath, fsPath string) error {
@@ -175,10 +266,13 @@ func CopyTo(dst io.Writer, b []byte) error {
 }
 
 func (v *Vault) passphrase() string {
-	return passphraseProvider()
+	return v.pass
 }
 
 func (v *Vault) deriveKey() ([]byte, error) {
+	if v.saltOverride != nil {
+		return argon2.IDKey([]byte(v.passphrase()), v.saltOverride, 3, 64*1024, 1, 32), nil
+	}
 	saltPath := filepath.Join(v.Dir, "salt.bin")
 	salt, err := os.ReadFile(saltPath)
 	if err != nil {

@@ -5,10 +5,29 @@ REPO="winm2m/valet-fs" # 이전 수정 사항 반영
 BINARY_NAME="valetfs"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 TMP_FILE=""
+TMP_DIR=""
+
+# Where release assets are fetched from. Overridable so the verification logic
+# can be exercised against a local fixture instead of only in production, which
+# is the difference between "the code looks right" and "tampering is rejected".
+RELEASE_BASE="${VALETFS_RELEASE_BASE:-}"
+
+# Set to 1 to refuse to install when the signature cannot be checked. Off by
+# default because cosign is not usually present on a fresh machine, and a
+# one-line installer that dead-ends helps nobody; the warning is loud instead.
+REQUIRE_SIGNATURE="${VALETFS_REQUIRE_SIGNATURE:-0}"
+
+# The identity a valid signature must carry. A signature that verifies against
+# some other workflow is not evidence of anything.
+COSIGN_IDENTITY_RE="${VALETFS_COSIGN_IDENTITY:-^https://github.com/${REPO}/\\.github/workflows/release\\.yml@refs/tags/}"
+COSIGN_ISSUER="${VALETFS_COSIGN_ISSUER:-https://token.actions.githubusercontent.com}"
 
 cleanup() {
   if [ -n "${TMP_FILE}" ] && [ -f "${TMP_FILE}" ]; then
     rm -f "${TMP_FILE}"
+  fi
+  if [ -n "${TMP_DIR}" ] && [ -d "${TMP_DIR}" ]; then
+    rm -rf "${TMP_DIR}"
   fi
 }
 trap cleanup EXIT
@@ -124,14 +143,94 @@ resolve_version() {
   [ -n "${VERSION}" ] || fail "unable to resolve latest release tag"
 }
 
+release_base() {
+  if [ -n "${RELEASE_BASE}" ]; then
+    printf '%s' "${RELEASE_BASE}"
+  else
+    printf 'https://github.com/%s/releases/download/%s' "${REPO}" "${VERSION}"
+  fi
+}
+
 download_binary() {
-  local url
-  url="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-linux-${DOWNLOAD_ARCH}"
+  local base asset
+  base="$(release_base)"
+  asset="${BINARY_NAME}-linux-${DOWNLOAD_ARCH}"
 
   log "Downloading ${BINARY_NAME} ${VERSION} (linux/${DOWNLOAD_ARCH})"
-  TMP_FILE="$(mktemp)"
-  curl -fL "${url}" -o "${TMP_FILE}"
+  TMP_DIR="$(mktemp -d)"
+  TMP_FILE="${TMP_DIR}/${asset}"
+  curl -fL "${base}/${asset}" -o "${TMP_FILE}"
+
+  verify_download "${base}" "${asset}"
+
   chmod +x "${TMP_FILE}"
+}
+
+# verify_download refuses to continue unless the downloaded bytes match the
+# release's SHA256SUMS, and — when cosign is available — unless that SHA256SUMS
+# was signed by this project's release workflow.
+#
+# The checksum alone is worth less than it looks: it is served from the same
+# place as the binary, so anyone who can replace one can replace the other. It
+# catches a corrupted or truncated download, not a malicious release. The
+# signature is the part that carries weight, because it is bound to a workflow
+# identity and recorded in a public transparency log.
+verify_download() {
+  local base="$1" asset="$2"
+
+  if ! curl -fL "${base}/SHA256SUMS" -o "${TMP_DIR}/SHA256SUMS" 2>/dev/null; then
+    fail "release ${VERSION} has no SHA256SUMS; refusing to install an unverified binary
+       (releases before signing was introduced can be installed with
+        VALETFS_RELEASE_BASE set deliberately, but do not do this for a machine
+        that will hold secrets)"
+  fi
+
+  verify_signature "${base}"
+
+  log "Verifying checksum"
+  ( cd "${TMP_DIR}" && grep " ${asset}\$" SHA256SUMS > expected.sha256 \
+      && sha256sum -c expected.sha256 >/dev/null 2>&1 ) \
+    || fail "checksum mismatch for ${asset}: the download does not match the release manifest"
+}
+
+verify_signature() {
+  local base="$1"
+
+  if ! command -v cosign >/dev/null 2>&1; then
+    if [ "${REQUIRE_SIGNATURE}" = "1" ]; then
+      fail "cosign is not installed and VALETFS_REQUIRE_SIGNATURE=1 was set"
+    fi
+    log ""
+    log "!! cosign is not installed, so the release SIGNATURE was not checked."
+    log "!! The checksum below only proves the download was not corrupted in"
+    log "!! transit - it is served from the same place as the binary, so it is"
+    log "!! no defence against a tampered release. This binary will hold your"
+    log "!! secrets. To verify properly:"
+    log "!!   https://docs.sigstore.dev/cosign/system_config/installation/"
+    log "!!   then re-run with VALETFS_REQUIRE_SIGNATURE=1"
+    log ""
+    return
+  fi
+
+  if ! curl -fL "${base}/SHA256SUMS.sig" -o "${TMP_DIR}/SHA256SUMS.sig" 2>/dev/null \
+     || ! curl -fL "${base}/SHA256SUMS.pem" -o "${TMP_DIR}/SHA256SUMS.pem" 2>/dev/null; then
+    if [ "${REQUIRE_SIGNATURE}" = "1" ]; then
+      fail "release ${VERSION} carries no signature and VALETFS_REQUIRE_SIGNATURE=1 was set"
+    fi
+    log "Warning: release ${VERSION} carries no signature; checksum only."
+    return
+  fi
+
+  log "Verifying signature (cosign, keyless)"
+  cosign verify-blob \
+    --certificate "${TMP_DIR}/SHA256SUMS.pem" \
+    --signature "${TMP_DIR}/SHA256SUMS.sig" \
+    --certificate-identity-regexp "${COSIGN_IDENTITY_RE}" \
+    --certificate-oidc-issuer "${COSIGN_ISSUER}" \
+    "${TMP_DIR}/SHA256SUMS" >/dev/null 2>&1 \
+    || fail "signature verification FAILED for release ${VERSION}.
+       Do not install this binary. Either the release was tampered with, or it
+       was not built by ${REPO}'s release workflow."
 }
 
 install_binary() {
@@ -155,6 +254,7 @@ main() {
   require_cmd uname
   require_cmd mktemp
   require_cmd install
+  require_cmd sha256sum
 
   log "Detecting installation environment..."
   detect_platform

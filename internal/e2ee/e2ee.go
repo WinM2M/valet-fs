@@ -145,6 +145,10 @@ type Conn struct {
 	onData  func([]byte)
 	onOpen  func()
 	onClose func()
+	// rekeyAttempts counts kx:hello frames that arrived after the session key
+	// was already set. Every one of them is somebody trying to take the channel
+	// over; none of them is normal traffic.
+	rekeyAttempts int
 }
 
 // WrapController wraps inner for the controller (vault) side. It knows the
@@ -184,11 +188,32 @@ func (c *Conn) handle(b []byte) {
 			return
 		case f.KX == "hello":
 			if !c.isController {
+				// One handshake per connection. The daemon used to accept a
+				// hello at any moment and replace the session key with it, so
+				// anyone who reached the session — a second claimant, or the hub
+				// itself — could seize the channel mid-conversation and then
+				// read the whole vault with MANIFEST and PULL. A genuine peer
+				// sends hello once, on open; a reconnect builds a new Conn and
+				// gets a fresh handshake.
+				c.mu.Lock()
+				established := c.sess != nil
+				if established {
+					c.rekeyAttempts++
+				}
+				c.mu.Unlock()
+				if established {
+					return
+				}
 				if peer, err := decodePub(f.Pub); err == nil {
 					if key, err := deriveKey(c.kp.Priv, peer); err == nil {
 						if sess, err := newSession(key); err == nil {
 							c.mu.Lock()
-							c.sess = sess
+							// Re-check: a concurrent hello may have won the race.
+							if c.sess == nil {
+								c.sess = sess
+							} else {
+								c.rekeyAttempts++
+							}
 							c.mu.Unlock()
 						}
 					}
@@ -260,6 +285,15 @@ func (c *Conn) Send(b []byte) error {
 }
 
 func (c *Conn) Close() error { return c.inner.Close() }
+
+// RekeyAttempts reports how many kx:hello frames arrived after the session was
+// already established. Anything above zero means someone tried to take over the
+// channel, and is worth surfacing rather than swallowing.
+func (c *Conn) RekeyAttempts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rekeyAttempts
+}
 
 // LoadOrGenerate returns the key pair stored at path, creating and persisting a
 // fresh one if the file does not exist yet. The second return value reports

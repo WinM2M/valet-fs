@@ -10,8 +10,8 @@ import (
 
 // NewMounter on Windows returns a WebDAV mounter and best-effort maps it as a
 // drive letter so the user does not have to run "net use" manually.
-func NewMounter(m *MemFS) Mounter {
-	return &windowsMounter{inner: NewWebdavMounter(m, "127.0.0.1:8088")}
+func NewMounter(m *MemFS, token string, allowRemote bool) Mounter {
+	return &windowsMounter{inner: NewWebdavMounter(m, "127.0.0.1:8088", token, allowRemote)}
 }
 
 // PreUnmount removes any stale network mapping left from a previous run.

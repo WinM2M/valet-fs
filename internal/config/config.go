@@ -37,6 +37,11 @@ type Config struct {
 	// WebdavDisabled disables the WebDAV server when true.
 	WebdavDisabled bool
 
+	// WebdavAllowRemote permits binding the WebDAV server to a non-loopback
+	// address. Off by default: the server serves every secret in the vault, so
+	// exposing it to the network must be a deliberate act.
+	WebdavAllowRemote bool
+
 	// SignalingURL is the Cloudflare Worker signaling endpoint for production mode.
 	SignalingURL string
 
@@ -67,6 +72,16 @@ type Config struct {
 	// JoinKey, when set, joins an app-provisioned session (reverse flow) as the
 	// daemon instead of creating a new session. Implies ws transport.
 	JoinKey string
+
+	// AuthorizedVaultsFile lists the vault identities this daemon accepts.
+	// Absent or empty means trust-on-first-use: the first vault to complete a
+	// handshake is pinned there.
+	AuthorizedVaultsFile string
+
+	// InsecureSignaling permits a plaintext (http/ws) hub on a non-loopback
+	// host. The session token travels in the connect URL, so this hands the
+	// session to anyone on the path; it must be asked for explicitly.
+	InsecureSignaling bool
 }
 
 // Load parses CLI flags and merges environment variables (.env supported).
@@ -84,12 +99,15 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&cfg.RuntimeDir, "runtime-dir", defaultEnv("VALETFS_RUNTIME_DIR", defaultRuntimeDir()), "Runtime state directory")
 	fs.StringVar(&cfg.WebdavAddr, "webdav-addr", defaultEnv("VALETFS_WEBDAV_ADDR", "127.0.0.1:0"), "WebDAV listen address")
 	fs.BoolVar(&cfg.WebdavDisabled, "webdav-disabled", defaultEnvBool("VALETFS_WEBDAV_DISABLED", false), "Disable WebDAV server")
+	fs.BoolVar(&cfg.WebdavAllowRemote, "webdav-allow-remote", defaultEnvBool("VALETFS_WEBDAV_ALLOW_REMOTE", false), "Allow binding WebDAV to a non-loopback address (exposes every secret to the network)")
 	fs.StringVar(&cfg.SignalingURL, "signaling", defaultEnv("VALETFS_SIGNALING", "https://valetfs-signaling.winm2m.workers.dev"), "Cloudflare Worker signaling URL")
 	fs.StringVar(&cfg.GitTempDir, "git-dir", defaultEnv("VALETFS_GIT_DIR", defaultGitDir()), "Ephemeral go-git diff directory")
 
 	fs.StringVar(&cfg.Transport, "transport", defaultEnv("VALETFS_TRANSPORT", "ws"), "Control-plane transport: ws (default)|webrtc")
 	fs.StringVar(&cfg.JoinKey, "join", defaultEnv("VALETFS_JOIN", ""), "Join an app-provisioned session with a connection key (reverse flow)")
 	fs.IntVar(&cfg.GraceSeconds, "grace", defaultEnvInt("VALETFS_GRACE", 300), "Seconds to keep VFS mounted after vault goes offline (ws transport; 0 = immediate)")
+	fs.StringVar(&cfg.AuthorizedVaultsFile, "authorized-vaults", defaultEnv("VALETFS_AUTHORIZED_VAULTS", defaultAuthorizedVaults()), "File listing vault identities this daemon accepts")
+	fs.BoolVar(&cfg.InsecureSignaling, "insecure-signaling", defaultEnvBool("VALETFS_INSECURE_SIGNALING", false), "Allow a plaintext hub on a non-loopback host (the session token travels in the clear)")
 	fs.StringVar(&cfg.ResumeKeyFile, "resume-key-file", defaultEnv("VALETFS_RESUME_KEY_FILE", ""), "Persist the daemon X25519 key here so a restart rejoins the same session (starts locked; off by default)")
 
 	var quotaMB int64
@@ -164,6 +182,13 @@ func defaultGitDir() string {
 		return filepath.Join(home, ".valetfs", "git")
 	}
 	return "/tmp/valetfs-git"
+}
+
+func defaultAuthorizedVaults() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".valetfs", "authorized_vaults")
+	}
+	return "/tmp/valetfs-authorized_vaults"
 }
 
 func defaultRuntimeDir() string {

@@ -1,0 +1,71 @@
+name: CI
+
+# Until now nothing ran the test suite outside a developer's laptop, so every
+# regression test in the repository was one forgotten command away from being
+# useless. A release pipeline that signs artifacts (see release.yml) is only
+# worth something if what it signs was tested first.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev pkg-config build-essential
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Tests (-race)
+        run: go test -race ./internal/... ./cmd/...
+
+      - name: Signaling hub tests
+        run: node --experimental-strip-types worker.test.mjs
+        working-directory: signaling
+
+      # The installer is what puts a secrets-holding binary on a user's machine.
+      # Its verification logic used to be exercised only in production, where a
+      # mistake looks like a successful install of a tampered binary.
+      - name: install.sh verification
+        run: ./scripts/install_verify_test.sh
+
+      - name: Cross-compile
+        run: |
+          GOOS=windows go build ./... 
+          GOOS=darwin go build ./...
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev pkg-config build-essential
+      # Reports only vulnerabilities this code actually reaches, so the signal
+      # stays worth acting on rather than becoming a wall of advisories. Findings
+      # are matched against .govulncheck-allow, which is why this can be a
+      # blocking gate instead of a permanently red one.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          ./scripts/vulncheck.sh

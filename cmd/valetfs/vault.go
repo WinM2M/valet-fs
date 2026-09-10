@@ -21,6 +21,8 @@ func runVault(args []string) error {
 	fs.SetOutput(os.Stderr)
 	vdirFlag := fs.String("vault-dir", defaultVaultDir(), "vault directory")
 	passwordFile := fs.String("password-file", "", "password file path")
+	passwordStdin := fs.Bool("password-stdin", false, "read the vault passphrase from stdin")
+	claimSecretFlag := fs.String("claim-secret", "", "claim secret for the session (from the daemon's pairing QR)")
 	transportFlag := fs.String("transport", defaultVaultTransport(), "control-plane transport: ws (default)|webrtc")
 	verbose := fs.Bool("v", false, "verbose output")
 	fs.BoolVar(verbose, "verbose", false, "verbose output")
@@ -29,7 +31,7 @@ func runVault(args []string) error {
 	}
 	args = fs.Args()
 	if len(args) == 0 {
-		return fmt.Errorf("usage: valetfs vault <init|add|ls|rm|pair|sync|unmount|status>")
+		return fmt.Errorf("usage: valetfs vault <init|add|ls|rm|rekey|pair|sync|unmount|status>")
 	}
 	vdir := *vdirFlag
 	authMode := readVaultAuthMode(vdir)
@@ -54,23 +56,25 @@ func runVault(args []string) error {
 				return strings.TrimSpace(string(pw))
 			}
 		}
-		reader := bufio.NewReader(os.Stdin)
-		line, _ := reader.ReadString('\n')
-		line = strings.TrimSpace(line)
-		if line != "" {
-			return line
+		// Reading stdin unconditionally when there is no terminal hangs forever
+		// under a supervisor, a CI job, or an AI agent, none of which will ever
+		// send a line. Piping a passphrase now has to be asked for.
+		if *passwordStdin {
+			reader := bufio.NewReader(os.Stdin)
+			line, _ := reader.ReadString('\n')
+			return strings.TrimSpace(line)
 		}
-		if authMode == "passphrase" {
-			return ""
-		}
-		return "valetfs-default-dev-passphrase"
+		return ""
 	})
 	v, err := vault.Open(vdir)
 	if err != nil {
 		return err
 	}
+	warnWeakVaultKey(v, vdir)
 	webrtc.SetVerbose(*verbose)
 	switch args[0] {
+	case "rekey":
+		return runVaultRekey(v, vdir, *passwordFile)
 	case "init":
 		_, err := os.Stat(filepath.Join(vdir, "manifest.json"))
 		if err == nil {
@@ -122,7 +126,7 @@ func runVault(args []string) error {
 			}
 		}
 		if *transportFlag == "ws" {
-			return vaultWSPair(v, vdir, signaling, sid)
+			return vaultWSPair(v, vdir, signaling, sid, *claimSecretFlag)
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -130,7 +134,12 @@ func runVault(args []string) error {
 		}
 		defer p.Close()
 		openCh := make(chan struct{}, 1)
-		p.OnOpen(func() { select { case openCh <- struct{}{}: default: } })
+		p.OnOpen(func() {
+			select {
+			case openCh <- struct{}{}:
+			default:
+			}
+		})
 		if err := p.Join(signaling, sid); err != nil {
 			return err
 		}
@@ -175,7 +184,7 @@ func runVault(args []string) error {
 		if *transportFlag != "ws" {
 			return fmt.Errorf("lock requires --transport ws")
 		}
-		return vaultWSSimple(signaling, sid, "LOCK")
+		return vaultWSSimple(signaling, sid, "LOCK", *claimSecretFlag)
 	case "unmount":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: valetfs vault unmount <session_id> [--signaling URL]")
@@ -194,7 +203,7 @@ func runVault(args []string) error {
 			}
 		}
 		if *transportFlag == "ws" {
-			return vaultWSSimple(signaling, sid, "UNMOUNT")
+			return vaultWSSimple(signaling, sid, "UNMOUNT", *claimSecretFlag)
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -224,7 +233,7 @@ func runVault(args []string) error {
 			}
 		}
 		if *transportFlag == "ws" {
-			return vaultWSSync(v, signaling, sid)
+			return vaultWSSync(v, signaling, sid, *claimSecretFlag)
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -262,7 +271,7 @@ func runVault(args []string) error {
 				}
 			}
 			if *transportFlag == "ws" {
-				return vaultWSStatus(signaling, sid)
+				return vaultWSStatus(signaling, sid, *claimSecretFlag)
 			}
 			p, err := webrtc.NewController()
 			if err != nil {
@@ -273,7 +282,10 @@ func runVault(args []string) error {
 			p.OnData(func(b []byte) {
 				m, err := webrtc.DecodeRPC(b)
 				if err == nil && strings.EqualFold(m.Type, "RES") {
-					select { case respCh <- m: default: }
+					select {
+					case respCh <- m:
+					default:
+					}
 				}
 			})
 			if err := p.Join(signaling, sid); err != nil {
@@ -305,6 +317,83 @@ func runVault(args []string) error {
 
 func authModePath(vdir string) string {
 	return filepath.Join(vdir, vaultAuthModeFile)
+}
+
+// warnWeakVaultKey tells the user, on every single command, when the vault at
+// rest is not actually protected. Staying quiet here is how a vault ends up
+// living for months under a key that is printed in the project's own source.
+func warnWeakVaultKey(v *vault.Vault, vdir string) {
+	switch {
+	case v.UsesLegacyPassphrase():
+		_, _ = fmt.Fprintf(os.Stderr,
+			"\n!! WARNING: the vault at %s is encrypted with a passphrase that is published\n"+
+				"!! in ValetFS's public source. Anyone who obtains this directory can decrypt it.\n"+
+				"!! Fix it now:  valetfs vault rekey --vault-dir %s\n\n", vdir, vdir)
+	case v.IsUnprotected():
+		_, _ = fmt.Fprintf(os.Stderr,
+			"\n!! WARNING: the vault at %s has no passphrase. The key is derived from the\n"+
+				"!! stored salt alone, so the directory decrypts itself.\n"+
+				"!! Fix it now:  valetfs vault rekey --vault-dir %s\n\n", vdir, vdir)
+	}
+}
+
+// runVaultRekey re-encrypts the vault under a new passphrase. It reads the new
+// passphrase twice from the terminal so a typo cannot lock the user out.
+func runVaultRekey(v *vault.Vault, vdir, passwordFile string) error {
+	newPass, err := readNewPassphrase(passwordFile)
+	if err != nil {
+		return err
+	}
+	if err := v.Rekey(newPass); err != nil {
+		return err
+	}
+	if err := writeVaultAuthMode(vdir, "passphrase"); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(os.Stdout,
+		"vault rekeyed at %s\nSet VALETFS_VAULT_PASSWORD (or pass --password-file) to open it from now on.\n",
+		vdir)
+	return nil
+}
+
+func readNewPassphrase(passwordFile string) (string, error) {
+	if passwordFile != "" {
+		b, err := os.ReadFile(passwordFile)
+		if err != nil {
+			return "", err
+		}
+		p := strings.TrimSpace(string(b))
+		if p == "" {
+			return "", fmt.Errorf("password file %s is empty", passwordFile)
+		}
+		return p, nil
+	}
+	if p := os.Getenv("VALETFS_VAULT_NEW_PASSWORD"); p != "" {
+		return p, nil
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return "", fmt.Errorf("no terminal: supply the new passphrase via --password-file or VALETFS_VAULT_NEW_PASSWORD")
+	}
+	_, _ = fmt.Fprint(os.Stdout, "New vault passphrase: ")
+	first, err := term.ReadPassword(int(os.Stdin.Fd()))
+	_, _ = fmt.Fprintln(os.Stdout)
+	if err != nil {
+		return "", err
+	}
+	_, _ = fmt.Fprint(os.Stdout, "Repeat: ")
+	second, err := term.ReadPassword(int(os.Stdin.Fd()))
+	_, _ = fmt.Fprintln(os.Stdout)
+	if err != nil {
+		return "", err
+	}
+	p := strings.TrimSpace(string(first))
+	if p != strings.TrimSpace(string(second)) {
+		return "", fmt.Errorf("passphrases did not match")
+	}
+	if p == "" {
+		return "", fmt.Errorf("passphrase must not be empty")
+	}
+	return p, nil
 }
 
 func readVaultAuthMode(vdir string) string {

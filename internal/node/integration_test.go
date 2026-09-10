@@ -24,6 +24,7 @@ type daemonHarness struct {
 
 	mu      sync.Mutex
 	mounted bool
+	claim   string
 }
 
 func (h *daemonHarness) isMounted() bool {
@@ -42,7 +43,14 @@ func startDaemon(t *testing.T, hubURL string, grace time.Duration) *daemonHarnes
 		h.fs.Wipe()
 	}
 	n := node.New(node.Config{FS: h.fs, Grace: grace, Lock: lock, Mounted: h.isMounted})
-	conn, sid, err := ws.DialDaemon(hubURL, "")
+	// Every session in these tests is gated by a claim secret, so the whole
+	// suite exercises the credential rather than a legacy path around it.
+	claim, err := ws.NewClaimSecret()
+	if err != nil {
+		t.Fatalf("claim secret: %v", err)
+	}
+	h.claim = claim
+	conn, sid, err := ws.DialDaemon(hubURL, "", "", claim)
 	if err != nil {
 		t.Fatalf("daemon dial: %v", err)
 	}
@@ -53,9 +61,9 @@ func startDaemon(t *testing.T, hubURL string, grace time.Duration) *daemonHarnes
 	return h
 }
 
-func connectVault(t *testing.T, hubURL, sid string) (*ws.Conn, *rpc.Client) {
+func connectVault(t *testing.T, hubURL, sid, claim string) (*ws.Conn, *rpc.Client) {
 	t.Helper()
-	conn, _, err := ws.DialController(hubURL, sid)
+	conn, _, _, err := ws.DialController(hubURL, sid, claim)
 	if err != nil {
 		t.Fatalf("vault dial: %v", err)
 	}
@@ -93,7 +101,7 @@ func newHub(t *testing.T) string {
 func TestPairAndPush(t *testing.T) {
 	hubURL := newHub(t)
 	d := startDaemon(t, hubURL, 5*time.Second)
-	conn, cl := connectVault(t, hubURL, d.sid)
+	conn, cl := connectVault(t, hubURL, d.sid, d.claim)
 	defer conn.Close()
 
 	pushFile(t, cl, "/keys/secret.txt", []byte("token=abc123"))
@@ -114,12 +122,12 @@ func TestReliableRejoin(t *testing.T) {
 	d := startDaemon(t, hubURL, 5*time.Second)
 
 	// Seed one file.
-	conn, cl := connectVault(t, hubURL, d.sid)
+	conn, cl := connectVault(t, hubURL, d.sid, d.claim)
 	pushFile(t, cl, "/keys/secret.txt", []byte("v"))
 	conn.Close()
 
 	for i := 0; i < 10; i++ {
-		conn, cl := connectVault(t, hubURL, d.sid)
+		conn, cl := connectVault(t, hubURL, d.sid, d.claim)
 		ctx, cancel := callCtx()
 		res, err := cl.Call(ctx, rpc.MethodStatus, nil)
 		cancel()
@@ -139,7 +147,7 @@ func TestGraceAutoLock(t *testing.T) {
 	hubURL := newHub(t)
 	d := startDaemon(t, hubURL, 200*time.Millisecond)
 
-	conn, cl := connectVault(t, hubURL, d.sid)
+	conn, cl := connectVault(t, hubURL, d.sid, d.claim)
 	pushFile(t, cl, "/keys/secret.txt", []byte("token"))
 	if !d.isMounted() {
 		t.Fatal("expected mounted after pair")
@@ -157,25 +165,64 @@ func TestGraceAutoLock(t *testing.T) {
 }
 
 // S4: reconnect within grace cancels the auto-lock.
-func TestGraceCancelOnReconnect(t *testing.T) {
+// Reconnecting and speaking cancels the countdown.
+//
+// This used to pass on the reconnect alone, because the hub's peer_online frame
+// cancelled grace. It no longer does: presence is plaintext and hub-supplied, so
+// letting it cancel would put "the secrets go when the phone goes away" at the
+// mercy of the relay. Real traffic from the peer is the evidence now, and both
+// paths in the app — pushing the vault, and the session screen's status call —
+// send something immediately after connecting.
+func TestGraceCancelledByPeerTraffic(t *testing.T) {
 	hubURL := newHub(t)
 	d := startDaemon(t, hubURL, 1*time.Second)
 
-	conn, cl := connectVault(t, hubURL, d.sid)
+	conn, cl := connectVault(t, hubURL, d.sid, d.claim)
 	pushFile(t, cl, "/keys/secret.txt", []byte("token"))
 	conn.Close()
 
 	time.Sleep(200 * time.Millisecond) // within grace
-	conn2, _ := connectVault(t, hubURL, d.sid)
+	conn2, cl2 := connectVault(t, hubURL, d.sid, d.claim)
 	defer conn2.Close()
+
+	ctx, cancel := callCtx()
+	defer cancel()
+	if _, err := cl2.Call(ctx, rpc.MethodStatus, nil); err != nil {
+		t.Fatalf("status after reconnect: %v", err)
+	}
 
 	time.Sleep(1200 * time.Millisecond) // past original deadline
 
 	if !d.isMounted() {
-		t.Fatal("expected still mounted (grace cancelled by reconnect)")
+		t.Fatal("expected still mounted (grace cancelled by peer traffic)")
 	}
 	if d.fs.Used() == 0 {
 		t.Fatal("expected file retained after reconnect")
+	}
+}
+
+// The other half of the same rule: a peer that merely appears does not hold the
+// secrets open. A hostile hub can emit peer_online for as long as it likes; the
+// daemon still locks on schedule unless somebody actually speaks to it.
+func TestPresenceAloneDoesNotCancelGrace(t *testing.T) {
+	hubURL := newHub(t)
+	d := startDaemon(t, hubURL, 500*time.Millisecond)
+
+	conn, cl := connectVault(t, hubURL, d.sid, d.claim)
+	pushFile(t, cl, "/keys/secret.txt", []byte("token"))
+	conn.Close() // arms grace via peer_offline
+
+	// Reconnect, which makes the hub emit peer_online, and then say nothing.
+	conn2, _ := connectVault(t, hubURL, d.sid, d.claim)
+	defer conn2.Close()
+
+	time.Sleep(900 * time.Millisecond) // past the deadline
+
+	if d.isMounted() {
+		t.Fatal("presence alone must not keep a daemon unlocked")
+	}
+	if d.fs.Used() != 0 {
+		t.Fatal("expected the heap to be wiped on grace expiry")
 	}
 }
 
@@ -189,7 +236,7 @@ func TestReconcileDaemonSideAdditions(t *testing.T) {
 	vaultFS := vfs.New(0)
 	_ = vaultFS.MkdirAll("/keys", 0o755)
 	_ = vaultFS.Write("/keys/a.txt", []byte("A"), 0o600)
-	conn, cl := connectVault(t, hubURL, d.sid)
+	conn, cl := connectVault(t, hubURL, d.sid, d.claim)
 	pushFile(t, cl, "/keys/a.txt", []byte("A"))
 	conn.Close() // vault offline
 
@@ -200,7 +247,7 @@ func TestReconcileDaemonSideAdditions(t *testing.T) {
 	}
 
 	// Vault reconnects and reconciles.
-	conn2, cl2 := connectVault(t, hubURL, d.sid)
+	conn2, cl2 := connectVault(t, hubURL, d.sid, d.claim)
 	defer conn2.Close()
 
 	ctx, cancel := callCtx()
@@ -259,7 +306,7 @@ func TestExplicitUnmount(t *testing.T) {
 	hubURL := newHub(t)
 	d := startDaemon(t, hubURL, 5*time.Second)
 
-	conn, cl := connectVault(t, hubURL, d.sid)
+	conn, cl := connectVault(t, hubURL, d.sid, d.claim)
 	defer conn.Close()
 	pushFile(t, cl, "/keys/secret.txt", []byte("token"))
 	if !d.isMounted() {
@@ -297,7 +344,11 @@ func TestE2EEEncryptedRoundTrip(t *testing.T) {
 		h.fs.Wipe()
 	}
 	n := node.New(node.Config{FS: h.fs, Grace: 5 * time.Second, Lock: lock, Mounted: h.isMounted})
-	rawD, sid, err := ws.DialDaemon(hubURL, dkp.PubB64())
+	claim, err := ws.NewClaimSecret()
+	if err != nil {
+		t.Fatalf("claim secret: %v", err)
+	}
+	rawD, sid, err := ws.DialDaemon(hubURL, dkp.PubB64(), "", claim)
 	if err != nil {
 		t.Fatalf("daemon dial: %v", err)
 	}
@@ -307,7 +358,7 @@ func TestE2EEEncryptedRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = dConn.Close() })
 
 	// Vault side with E2EE (daemon pub authenticated via claim/QR).
-	rawV, daemonPub, err := ws.DialController(hubURL, sid)
+	rawV, daemonPub, _, err := ws.DialController(hubURL, sid, claim)
 	if err != nil {
 		t.Fatalf("vault dial: %v", err)
 	}

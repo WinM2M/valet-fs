@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -69,8 +70,8 @@ func New(cfg *config.Config) (*Daemon, error) {
 	return &Daemon{
 		cfg:     cfg,
 		fs:      memfs,
-		mounter: vfs.NewMounter(memfs),
-		webdav:  vfs.NewWebdavMounter(memfs, cfg.WebdavAddr),
+		mounter: vfs.NewMounter(memfs, cfg.ControlToken, cfg.WebdavAllowRemote),
+		webdav:  vfs.NewWebdavMounter(memfs, cfg.WebdavAddr, cfg.ControlToken, cfg.WebdavAllowRemote),
 		repo:    repo,
 	}, nil
 }
@@ -190,6 +191,11 @@ func (d *Daemon) Unmount() error {
 	return nil
 }
 
+// WipeHistory clears the on-disk change history. Locking wipes the heap; the
+// history of what was in it has to go at the same time, or "locked" means the
+// secrets are gone but the record of them is not.
+func (d *Daemon) WipeHistory() error { return d.repo.Wipe() }
+
 // Sync commits a manifest of the current VFS state to the diff repo.
 func (d *Daemon) Sync() (string, error) {
 	snap := d.fs.Snapshot()
@@ -236,7 +242,12 @@ func (d *Daemon) StartDevAPI() error {
 	}
 	d.devAddr = ln.Addr().String()
 	go func() {
-		log.Printf("valetfs: control API on http://%s?token=%s", d.devAddr, d.cfg.ControlToken)
+		// The control token reads every secret in the vault, so it must not be
+		// logged: daemon output is routinely redirected to a file, captured by a
+		// supervisor, or scraped into an AI agent's transcript. runtime.json
+		// (0600) is the one place it belongs.
+		log.Printf("valetfs: control API on http://%s (token in %s)",
+			d.devAddr, filepath.Join(d.cfg.RuntimeDir, "runtime.json"))
 		if err := d.devSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("valetfs: dev API server error: %v", err)
 		}
@@ -249,12 +260,18 @@ func (d *Daemon) StartDevAPI() error {
 	return nil
 }
 
+// auth checks the control token. The header is the preferred carrier; the
+// query parameter is still accepted so existing scripts keep working, but
+// nothing in this repo emits it any more.
 func (d *Daemon) auth(r *http.Request) bool {
-	tok := r.URL.Query().Get("token")
+	tok := r.Header.Get("X-Valet-Token")
 	if tok == "" {
-		tok = r.Header.Get("X-Valet-Token")
+		tok = r.URL.Query().Get("token")
 	}
-	return tok != "" && tok == d.cfg.ControlToken
+	if tok == "" || d.cfg.ControlToken == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(tok), []byte(d.cfg.ControlToken)) == 1
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -582,7 +599,10 @@ func (d *Daemon) writeRuntimeState() error {
 		return err
 	}
 	state := RuntimeState{
-		ControlURL:   fmt.Sprintf("http://%s?token=%s", d.devAddr, d.cfg.ControlToken),
+		// No token in the URL: control_url gets echoed into logs and shell
+		// history far more casually than control_token does. Callers combine it
+		// with the X-Valet-Token header instead.
+		ControlURL:   fmt.Sprintf("http://%s", d.devAddr),
 		ControlAddr:  d.devAddr,
 		ControlToken: d.cfg.ControlToken,
 		WebDAVAddr:   d.webdav.Addr(),

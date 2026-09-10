@@ -13,6 +13,8 @@ package hub
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -34,12 +36,15 @@ type presence struct {
 }
 
 type session struct {
-	mu        sync.Mutex
-	id        string
-	daemonTok string
-	vaultTok  string
-	daemonPub string                     // X25519 public key (base64) for E2EE
-	conns     map[string]*websocket.Conn // role -> conn
+	mu          sync.Mutex
+	id          string
+	daemonTok   string
+	vaultTok    string
+	daemonPub   string                     // X25519 public key (base64) for E2EE
+	conns       map[string]*websocket.Conn // role -> conn
+	versions    []int
+	claimHash   string
+	daemonPubV2 string
 }
 
 func (s *session) other(role string) string {
@@ -93,16 +98,28 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Role string `json:"role"`
-		Init bool   `json:"init"`
-		Pub  string `json:"pub"`
+		Role        string `json:"role"`
+		Init        bool   `json:"init"`
+		Pub         string `json:"pub"`
+		PubV2       string `json:"pub_v2"`
+		Versions    []int  `json:"versions"`
+		ClaimSecret string `json:"claim_secret"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Role != roleDaemon {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "role must be daemon"})
 		return
 	}
-	sess := &session{id: s.idgen(), daemonTok: randomHex(), daemonPub: body.Pub, conns: map[string]*websocket.Conn{}}
+	sess := &session{
+		id: s.idgen(), daemonTok: randomHex(), daemonPub: body.Pub, daemonPubV2: body.PubV2,
+		versions: body.Versions, conns: map[string]*websocket.Conn{},
+	}
+	// Only the hash, as the Cloudflare hub does. A self-hosted hub is not a more
+	// trusted place to keep the credential that opens a vault.
+	if body.ClaimSecret != "" {
+		sum := sha256.Sum256([]byte(body.ClaimSecret))
+		sess.claimHash = hex.EncodeToString(sum[:])
+	}
 	s.mu.Lock()
 	s.sessions[sess.id] = sess
 	s.mu.Unlock()
@@ -119,13 +136,31 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.mu.Lock()
-	if sess.vaultTok == "" {
+	// The session id is an identifier, not a credential: it is printed to a
+	// terminal and travels through logs. Where a claim secret was set, it is
+	// what authorises claiming — and both hubs have to agree on that, or the
+	// weaker one becomes the way in.
+	if sess.claimHash != "" {
+		sum := sha256.Sum256([]byte(r.Header.Get("X-Valet-Claim-Secret")))
+		if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(sess.claimHash)) != 1 {
+			sess.mu.Unlock()
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+	}
+	first := sess.vaultTok == ""
+	if first {
 		sess.vaultTok = randomHex()
 	}
 	tok := sess.vaultTok
 	pub := sess.daemonPub
+	pubV2 := sess.daemonPubV2
+	versions := sess.versions
 	sess.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"controller_token": tok, "daemon_pub": pub})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"controller_token": tok, "daemon_pub": pub, "daemon_pub_v2": pubV2,
+		"versions": versions, "first_claim": first,
+	})
 }
 
 func (s *Server) handleWS(ws *websocket.Conn) {
@@ -170,11 +205,15 @@ func (s *Server) handleWS(ws *websocket.Conn) {
 		}
 	}()
 
-	// Relay loop: forward every frame verbatim to the other role.
+	// Relay loop: forward frames to the other role, minus the ones only the hub
+	// may send. See isSystemFrame.
 	for {
 		var data []byte
 		if err := websocket.Message.Receive(ws, &data); err != nil {
 			return
+		}
+		if isSystemFrame(data) {
+			continue
 		}
 		sess.mu.Lock()
 		peer := sess.conns[sess.other(role)]
@@ -183,6 +222,23 @@ func (s *Server) handleWS(ws *websocket.Conn) {
 			_ = websocket.Message.Send(peer, data)
 		}
 	}
+}
+
+// isSystemFrame reports whether a frame a peer sent claims to be a presence or
+// system frame. Presence drives the daemon's grace timer — peer_offline starts
+// the countdown that unmounts and wipes, peer_online cancels it — so relaying a
+// peer's own presence frames would let either side destroy the other's secrets
+// or keep a daemon unlocked forever. Only the hub speaks presence.
+// The rule is "carries a sys key at all", not "carries a sys string". Anything
+// looser invites a bypass hunt, and the Cloudflare hub applies the same rule, so
+// the two implementations cannot drift into disagreeing about a frame.
+func isSystemFrame(data []byte) bool {
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(data, &probe) != nil {
+		return false // not JSON, or not an object: opaque app payload, relay it
+	}
+	_, ok := probe["sys"]
+	return ok
 }
 
 func sendPresence(ws *websocket.Conn, sys, role string) {

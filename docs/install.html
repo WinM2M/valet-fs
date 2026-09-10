@@ -127,10 +127,49 @@
 
     <h2>Optional Parameters</h2>
     <ul>
-      <li>Install a specific version: set <code>VALETFS_VERSION=v0.1.0</code></li>
+      <li>Install a specific version: set <code>VALETFS_VERSION=v0.2.0</code></li>
       <li>Change install path: set <code>INSTALL_DIR=/custom/bin</code></li>
+      <li>Refuse to install unless the signature verifies: set
+          <code>VALETFS_REQUIRE_SIGNATURE=1</code></li>
     </ul>
-    <pre><code>curl -fsSL https://winm2m.github.io/valet-fs/install.sh | VALETFS_VERSION=v0.1.0 INSTALL_DIR=$HOME/.local/bin bash</code></pre>
+    <pre><code>curl -fsSL https://winm2m.github.io/valet-fs/install.sh | VALETFS_VERSION=v0.2.0 INSTALL_DIR=$HOME/.local/bin bash</code></pre>
+
+    <h2>Verifying what you installed</h2>
+    <p>
+      This binary ends up holding your credentials, so it is worth knowing where it
+      came from. Every release publishes a <code>SHA256SUMS</code> covering all
+      artifacts, signed with
+      <a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a>
+      keyless &mdash; there is no private key, the signature is bound to the release
+      workflow&rsquo;s identity and recorded in a public transparency log.
+    </p>
+    <p>
+      The installer checks the checksum always, and checks the signature when
+      <code>cosign</code> is installed. If it is not, the installer says so rather
+      than staying quiet: a checksum served from the same place as the binary proves
+      the download was not corrupted, and nothing more. Install cosign and re-run
+      with <code>VALETFS_REQUIRE_SIGNATURE=1</code> to make a missing or invalid
+      signature a hard failure.
+    </p>
+    <p>To verify a release by hand:</p>
+    <pre><code>V=v0.2.0
+base=https://github.com/WinM2M/valet-fs/releases/download/$V
+curl -fLO $base/SHA256SUMS
+curl -fLO $base/SHA256SUMS.sig
+curl -fLO $base/SHA256SUMS.pem
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature SHA256SUMS.sig \
+  --certificate-identity-regexp '^https://github.com/winm2m/valet-fs/\.github/workflows/release\.yml@refs/tags/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing</code></pre>
+    <p>
+      One thing this does not cover: an attacker who can change the release workflow
+      itself can still produce a valid signature. What they cannot do is produce one
+      quietly. The ValetFS iOS app also shows the digest it expects, and the app
+      reaches you through Apple rather than GitHub, so the two have to agree.
+    </p>
 
     <h2>AI agent skill (Claude Code)</h2>
     <p>

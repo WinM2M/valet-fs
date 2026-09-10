@@ -2,10 +2,12 @@ package vfs
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,16 +26,79 @@ type WebdavMounter struct {
 	fs     *MemFS
 	srv    *http.Server
 	addr   string
+	token  string
+	remote bool
 	doneCh chan error
 }
 
 // NewWebdavMounter creates a WebDAV mounter listening on 127.0.0.1:<port>.
 // If addr is empty an ephemeral free port is selected automatically.
-func NewWebdavMounter(m *MemFS, addr string) *WebdavMounter {
+//
+// token authenticates every request. Loopback is NOT an authorization
+// boundary: any other process (or user) on the same host can reach the port,
+// so an unauthenticated server hands the whole vault to anything that can run
+// curl. An empty token is rejected at Mount time rather than silently serving
+// in the clear.
+//
+// allowRemote must be set explicitly to bind anywhere other than loopback.
+func NewWebdavMounter(m *MemFS, addr, token string, allowRemote bool) *WebdavMounter {
 	if addr == "" {
 		addr = "127.0.0.1:0"
 	}
-	return &WebdavMounter{fs: m, addr: addr, doneCh: make(chan error, 1)}
+	return &WebdavMounter{fs: m, addr: addr, token: token, remote: allowRemote, doneCh: make(chan error, 1)}
+}
+
+// isLoopbackAddr reports whether addr binds only to a loopback interface.
+// An empty or wildcard host ("", "0.0.0.0", "[::]") reaches the network.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// authorize checks the request credential in constant time. Three carriers are
+// accepted because WebDAV clients differ: HTTP Basic (Finder, davfs2 and other
+// kernel clients cannot set custom headers; any username, password = token),
+// Authorization: Bearer, and a ?token= query parameter for quick curl use.
+func (w *WebdavMounter) authorize(r *http.Request) bool {
+	if w.token == "" {
+		return false
+	}
+	if _, pass, ok := r.BasicAuth(); ok && tokenEqual(pass, w.token) {
+		return true
+	}
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		if tokenEqual(strings.TrimPrefix(h, "Bearer "), w.token) {
+			return true
+		}
+	}
+	return tokenEqual(r.URL.Query().Get("token"), w.token)
+}
+
+func tokenEqual(got, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// authHandler rejects unauthenticated requests before the WebDAV handler ever
+// sees a path.
+func (w *WebdavMounter) authHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if !w.authorize(r) {
+			rw.Header().Set("WWW-Authenticate", `Basic realm="valetfs"`)
+			http.Error(rw, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(rw, r)
+	})
 }
 
 // Addr returns the bound TCP address once Mount has started listening.
@@ -50,6 +115,14 @@ func (w *WebdavMounter) Addr() string {
 // accepted for parity with the Mounter interface but is informational only;
 // the server is always exposed via HTTP loopback.
 func (w *WebdavMounter) Mount(_ string) error {
+	if w.token == "" {
+		return errors.New("webdav: refusing to serve without an auth token")
+	}
+	if !w.remote && !isLoopbackAddr(w.addr) {
+		return fmt.Errorf("webdav: refusing to bind %s without --webdav-allow-remote "+
+			"(the server would expose every secret to the network)", w.addr)
+	}
+
 	handler := &webdav.Handler{
 		FileSystem: newWebdavAdapter(w.fs),
 		LockSystem: webdav.NewMemLS(),
@@ -64,7 +137,7 @@ func (w *WebdavMounter) Mount(_ string) error {
 	w.mu.Lock()
 	w.srv = &http.Server{
 		Addr:              ln.Addr().String(),
-		Handler:           handler,
+		Handler:           w.authHandler(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	w.mu.Unlock()
