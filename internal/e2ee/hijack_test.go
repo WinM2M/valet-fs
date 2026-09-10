@@ -42,50 +42,76 @@ func hello(t *testing.T, kp *KeyPair) []byte {
 	return b
 }
 
-// A daemon used to accept a kx:hello at any moment and swap the session key for
-// it, so anyone who reached the session could seize the channel mid-conversation
-// and then read the whole vault. Only the first handshake counts.
-func TestDaemonRefusesToRekeyMidSession(t *testing.T) {
+// The daemon's Conn lives as long as its socket to the hub, which outlives many
+// app connections, and the app makes a new ephemeral key on every one. Ignoring
+// the second hello meant a reconnecting vault kept sending frames the daemon
+// could no longer read — silently, and only the first connection after a daemon
+// start ever worked.
+func TestReconnectingVaultIsAccepted(t *testing.T) {
 	daemonKP, _ := Generate()
-	legitKP, _ := Generate()
-	attackerKP, _ := Generate()
+	first, _ := Generate()
+	second, _ := Generate() // a fresh ephemeral, as the app makes on each connect
 
 	inner := &fakeConn{}
 	conn := WrapDaemon(inner, daemonKP)
-
 	var got [][]byte
 	conn.OnData(func(b []byte) { got = append(got, append([]byte(nil), b...)) })
 
-	inner.push(hello(t, legitKP))
-
-	// The attacker joins the session and tries to take the channel over.
-	inner.push(hello(t, attackerKP))
-	if conn.RekeyAttempts() != 1 {
-		t.Fatalf("rekey attempt not recorded: got %d", conn.RekeyAttempts())
+	inner.push(hello(t, first))
+	inner.push(hello(t, second))
+	if conn.Rekeys() != 1 {
+		t.Fatalf("the reconnect should be counted once, got %d", conn.Rekeys())
 	}
 
-	// The legitimate peer's traffic still decrypts...
-	legitKey, _ := deriveKey(legitKP.Priv, daemonKP.Pub)
-	legitSess, _ := newSession(legitKey)
-	ct, _ := legitSess.seal([]byte(`{"type":"REQ","method":"STATUS"}`))
+	// Traffic under the NEW key must arrive: that is what reconnecting means.
+	key, _ := deriveKey(second.Priv, daemonKP.Pub)
+	sess, _ := newSession(key)
+	ct, _ := sess.seal([]byte(`{"type":"REQ","method":"STATUS"}`))
 	blob, _ := json.Marshal(frame{Enc: ct})
 	inner.push(blob)
 	if len(got) != 1 || string(got[0]) != `{"type":"REQ","method":"STATUS"}` {
-		t.Fatalf("legitimate peer lost the channel: %q", got)
+		t.Fatalf("the reconnected vault could not be heard: %q", got)
 	}
 
-	// ...and the attacker's does not.
-	attackerKey, _ := deriveKey(attackerKP.Priv, daemonKP.Pub)
-	attackerSess, _ := newSession(attackerKey)
-	ct, _ = attackerSess.seal([]byte(`{"type":"REQ","method":"PULL"}`))
+	// And the old key is finished, which is what a rekey means.
+	oldKey, _ := deriveKey(first.Priv, daemonKP.Pub)
+	oldSess, _ := newSession(oldKey)
+	ct, _ = oldSess.seal([]byte(`{"type":"REQ","method":"PULL"}`))
 	blob, _ = json.Marshal(frame{Enc: ct})
 	inner.push(blob)
 	if len(got) != 1 {
-		t.Fatalf("attacker frame was decrypted and delivered: %q", got)
+		t.Fatal("a frame under the superseded key was still accepted")
 	}
 }
 
-// A reconnect builds a fresh Conn, which must still be able to handshake.
+// What keeps strangers out of the vault role in v1 is the claim secret, not
+// this layer: v1 cannot tell a legitimate reconnect from a takeover, because on
+// the wire they are the same thing. That is the hole v2 exists to close, and
+// this test records the limit rather than pretending it is covered.
+func TestV1CannotDistinguishReconnectFromTakeover(t *testing.T) {
+	daemonKP, _ := Generate()
+	legit, _ := Generate()
+	stranger, _ := Generate()
+
+	inner := &fakeConn{}
+	conn := WrapDaemon(inner, daemonKP)
+	var got [][]byte
+	conn.OnData(func(b []byte) { got = append(got, append([]byte(nil), b...)) })
+
+	inner.push(hello(t, legit))
+	inner.push(hello(t, stranger))
+
+	key, _ := deriveKey(stranger.Priv, daemonKP.Pub)
+	sess, _ := newSession(key)
+	ct, _ := sess.seal([]byte(`{"type":"REQ","method":"PULL"}`))
+	blob, _ := json.Marshal(frame{Enc: ct})
+	inner.push(blob)
+	if len(got) != 1 {
+		t.Fatal("v1 is expected to accept this; if it no longer does, the comment above is stale")
+	}
+}
+
+// A brand new Conn, as a daemon restart produces, must also handshake cleanly.
 func TestReconnectGetsAFreshHandshake(t *testing.T) {
 	daemonKP, _ := Generate()
 	peerKP, _ := Generate()
@@ -93,8 +119,8 @@ func TestReconnectGetsAFreshHandshake(t *testing.T) {
 	inner := &fakeConn{}
 	conn := WrapDaemon(inner, daemonKP)
 	inner.push(hello(t, peerKP))
-	if conn.RekeyAttempts() != 0 {
-		t.Fatal("first handshake must not count as a rekey attempt")
+	if conn.Rekeys() != 0 {
+		t.Fatal("the first handshake is not a rekey")
 	}
 
 	reconnected := WrapDaemon(&fakeConn{}, daemonKP)

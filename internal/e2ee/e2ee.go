@@ -145,10 +145,9 @@ type Conn struct {
 	onData  func([]byte)
 	onOpen  func()
 	onClose func()
-	// rekeyAttempts counts kx:hello frames that arrived after the session key
-	// was already set. Every one of them is somebody trying to take the channel
-	// over; none of them is normal traffic.
-	rekeyAttempts int
+	// rekeys counts handshakes after the first on this connection. Normal
+	// traffic: each one is a phone reopening the session screen.
+	rekeys int
 }
 
 // WrapController wraps inner for the controller (vault) side. It knows the
@@ -188,32 +187,34 @@ func (c *Conn) handle(b []byte) {
 			return
 		case f.KX == "hello":
 			if !c.isController {
-				// One handshake per connection. The daemon used to accept a
-				// hello at any moment and replace the session key with it, so
-				// anyone who reached the session — a second claimant, or the hub
-				// itself — could seize the channel mid-conversation and then
-				// read the whole vault with MANIFEST and PULL. A genuine peer
-				// sends hello once, on open; a reconnect builds a new Conn and
-				// gets a fresh handshake.
-				c.mu.Lock()
-				established := c.sess != nil
-				if established {
-					c.rekeyAttempts++
-				}
-				c.mu.Unlock()
-				if established {
-					return
-				}
+				// Accept a new hello even after one succeeded.
+				//
+				// This used to refuse them, to stop somebody who reached the
+				// session seizing an established channel. The comment claimed a
+				// reconnect built a fresh Conn and so was unaffected. That is
+				// false on the daemon side: this Conn lives as long as the
+				// daemon's socket to the hub, which outlives many app
+				// connections, and the app makes a new ephemeral key every time.
+				// So a reconnecting vault sent a key the daemon ignored, kept
+				// its old one, and every frame afterwards failed to decrypt —
+				// silently. Only the first connection after a daemon start ever
+				// worked.
+				//
+				// Refusing did not buy security either. v1 cannot tell a
+				// legitimate reconnect from a takeover: the two are identical on
+				// the wire, so blocking one blocks both. What actually keeps
+				// strangers out of this role is the claim secret, and what makes
+				// the peer's identity checkable is v2. v1 exists only to keep
+				// already-paired apps working until M3 retires it, and a v1 that
+				// cannot reconnect does not do that.
 				if peer, err := decodePub(f.Pub); err == nil {
 					if key, err := deriveKey(c.kp.Priv, peer); err == nil {
 						if sess, err := newSession(key); err == nil {
 							c.mu.Lock()
-							// Re-check: a concurrent hello may have won the race.
-							if c.sess == nil {
-								c.sess = sess
-							} else {
-								c.rekeyAttempts++
+							if c.sess != nil {
+								c.rekeys++
 							}
+							c.sess = sess
 							c.mu.Unlock()
 						}
 					}
@@ -286,13 +287,13 @@ func (c *Conn) Send(b []byte) error {
 
 func (c *Conn) Close() error { return c.inner.Close() }
 
-// RekeyAttempts reports how many kx:hello frames arrived after the session was
-// already established. Anything above zero means someone tried to take over the
-// channel, and is worth surfacing rather than swallowing.
-func (c *Conn) RekeyAttempts() int {
+// Rekeys reports how many handshakes followed the first on this connection.
+// Each is a peer reconnecting, which is ordinary; the count is here because a
+// wildly high number is worth noticing.
+func (c *Conn) Rekeys() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.rekeyAttempts
+	return c.rekeys
 }
 
 // LoadOrGenerate returns the key pair stored at path, creating and persisting a
