@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Where workload identity federation can't go</title>
+<meta name="description" content="Federated identity removed static API keys from workloads that run inside a cloud. The machine your agent actually runs on is not one of them.">
+<meta property="og:title" content="Where workload identity federation can't go">
+<meta property="og:description" content="Federated identity removed static API keys from workloads that run inside a cloud. Your laptop, your home server and the container your agent runs in have no issuer to exchange, so they fall back to a file on disk.">
+<meta property="og:type" content="article">
+<link rel="stylesheet" href="./_style.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <h1>Where workload identity federation can't go</h1>
+    <p class="meta">22 September 2026 · Youngjune Kwon</p>
+    <p>2026 was the year the industry agreed on how to stop giving machines long-lived API
+    keys. The answer works, it is shipping, and it does not reach the machine most agents
+    actually run on.</p>
+  </div>
+
+  <div class="card">
+    <p><strong>The short version.</strong> Federated identity solves the secrets problem for
+    workloads that run <em>inside</em> a cloud, because those workloads already have an identity
+    to exchange. A laptop, a home server and the container an agent runs in have none. They fall
+    back to a file on disk — and a file on disk is what every agent credential incident this year
+    actually turned on.</p>
+  </div>
+
+  <h2>What got solved</h2>
+
+  <p>The fix has a name and a date. Workload identity federation lets a workload prove who it is
+  with an identity it already holds — an AWS IAM role, a GCP or Kubernetes service account, an
+  Azure managed identity, a GitHub Actions OIDC token — and trade that proof for a short-lived
+  token. No static key is created, stored or rotated, because none exists.</p>
+
+  <p>It is not a proposal. Anthropic made WIF generally available on the Claude Platform on
+  <a href="https://claude.com/blog/workload-identity-federation">17 June 2026</a>, which removes
+  static API keys from production workloads outright; a GitHub Action can exchange its OIDC token
+  for a short-lived access token with no <code>ANTHROPIC_API_KEY</code> anywhere. The hyperscalers
+  shipped their own agent identity services in parallel — Amazon Bedrock AgentCore Identity,
+  Microsoft Entra Agent ID, Google Vertex AI Agent Engine. The IETF has a draft,
+  <code>draft-klrc-aiagent-auth-00</code>, that composes WIMSE, SPIFFE/SPIRE and OAuth 2.0 into a
+  single agent identity system rather than inventing a new protocol.</p>
+
+  <p>Above that layer, the brokers arrived. 1Password shipped Privileged Access in July 2026,
+  built on Apono, eliminating standing privilege for human and agent identities alike, with
+  risk-based approval routing and a credential broker that scopes credentials to a single GitHub
+  Actions workflow run. Human approval mid-task has a standard too: CIBA, with Rich Authorization
+  Requests (<a href="https://www.rfc-editor.org/rfc/rfc9396.html">RFC 9396</a>) describing exactly
+  what is being asked, so an agent can pause, ask a person on a separate trusted device, and
+  resume.</p>
+
+  <p>This is a good answer. It is the right answer. The problem is where it applies.</p>
+
+  <h2>What did not get solved</h2>
+
+  <p>Every mechanism above starts from the same premise: <strong>the workload already has an
+  identity that somebody trustworthy will vouch for.</strong> That premise holds in a cloud. It
+  does not hold on the machine most people actually run an agent on.</p>
+
+  <p>Your laptop has no IAM role. Your home server has no Kubernetes service account. The
+  dev container your coding agent works in has no OIDC issuer that a cloud provider will accept.
+  There is nothing to federate <em>from</em>. So the advice in practice — including the advice in
+  vendor documentation — reduces to exporting the key in your shell profile and letting the agent
+  inherit it from the environment. The reasoning stops at "keep it out of the chat transcript",
+  which is a real improvement and leaves the plaintext exactly where it was.</p>
+
+  <p>The scale of that fallback is measurable. GitGuardian counted 28.65 million hardcoded secrets
+  pushed to public GitHub in 2025, with secrets belonging to AI services up 81%. A Cloud Security
+  Alliance survey found 68% of organisations cannot reliably distinguish an AI agent's activity
+  from a person's, and 80% of IT leaders have watched an agent act outside its expected behaviour.
+  HiddenLayer's 2026 threat report puts autonomous agents behind one in eight reported AI
+  breaches.</p>
+
+  <h2>The file is the target, not the key</h2>
+
+  <p>The incidents of 2026 have a shape, and it is worth stating precisely, because it changes
+  what a defence has to do.</p>
+
+  <p>At Black Hat USA on 5 August 2026, Elad Meged of Novee Security showed that a GitHub issue
+  opened by an account with <em>no repository privileges</em> was enough to reach CI runner secrets
+  in the vendors' own repositories for Claude Code, Gemini CLI and OpenAI Codex. In Claude Code, a
+  command validator that stripped single-quoted text before running its checks let a payload
+  smuggled inside a <code>git push --receive-pack</code> flag through untouched. After two rounds
+  of patch and bypass, the final variant — CVE-2026-54316 — used the agent's own pre-approved
+  access to Hugging Face to exfiltrate an API key one character at a time, reading public download
+  counters as a covert channel.</p>
+
+  <p>Read that again as a defender. The attacker did not steal a key. The attacker <strong>asked
+  the agent to read a file it was already allowed to read</strong>, and the agent complied, because
+  from the inside there is no difference between a legitimate instruction and a smuggled one.</p>
+
+  <p>The same shape repeats. SmartLoader spent three months building a fake developer ecosystem —
+  five GitHub accounts with AI-generated personas — before submitting a trojanised MCP server to a
+  legitimate registry; the payload harvested browser passwords, cloud session tokens, SSH keys and
+  API keys. In January 2026, 42,000 exposed OpenClaw instances were found on the public internet,
+  over a thousand of them running unauthenticated MCP endpoints leaking API keys and Slack
+  credentials. A February scan found more than 8,000 MCP servers reachable on the internet; 492 had
+  neither client authentication nor traffic encryption, and roughly four in ten accept requests
+  from anyone.</p>
+
+  <p>None of these are key-theft stories. They are all stories about a <em>readable file on a
+  machine an agent could reach</em>. Rotating the key does not help, because the next key goes in
+  the same file. Shortening its lifetime helps only if the lifetime is shorter than the attack, and
+  an attack that runs inside your own build takes seconds.</p>
+
+  <h2>The question nobody has a clean answer to</h2>
+
+  <p>There is an honest limit here, and it is worth naming rather than selling around. Even with a
+  perfect broker, a just-in-time credential and a human tapping approve, the secret eventually has
+  to be used — which means it enters the agent's process memory. As one survey of the tooling put
+  it: a CLI call returns the key, the process holds it for the duration of the request, and any
+  tool with access to that process state during the window can observe it.</p>
+
+  <p>No vault closes that window. What a design can decide is <strong>how wide the window is and
+  what is left when it shuts.</strong> That is the whole design space, and it is where the
+  cloud-shaped answers stop being available to a machine with no issuer.</p>
+
+  <h2>What is left for a machine with no identity</h2>
+
+  <p>If you cannot federate, you need the three properties federation was giving you, obtained some
+  other way:</p>
+
+  <ul>
+    <li><strong>No durable copy.</strong> The credential exists in memory for the work and leaves
+    nothing behind — no dotfile, no environment variable inherited by every child process, no
+    config directory that outlives the job.</li>
+    <li><strong>An authority that can say no.</strong> Something outside the machine decides
+    whether this request proceeds, and can revoke afterwards. If the deciding authority lives on
+    the compromised machine, it is not an authority.</li>
+    <li><strong>A revocation that actually reaches.</strong> Not a rotation you have to remember,
+    but a default: when the session ends, access ends.</li>
+  </ul>
+
+  <p>Put like that, the answer for a personal machine looks less like a cloud IAM system and more
+  like a valet stand. You hand over use, not possession. The thing that holds the key is not the
+  thing being asked to do the work, and it is not reachable from the machine that might be
+  compromised. A phone is an unglamorous but nearly ideal candidate: it has a secure element, it
+  has biometric gating, it is already in your pocket, and — the part that matters — an attacker who
+  owns your laptop does not own it.</p>
+
+  <h2>Why this is likely to matter more, not less</h2>
+
+  <p>Agent-run infrastructure moved from innovators to early adopters this year; "AI-assisted
+  incident response" became "autonomous incident response" in enterprise SRE vocabulary, and
+  Gartner expects 40% of enterprise applications to embed task-specific agents by the end of 2026,
+  up from under 5% a year earlier. The cloud-side half of that fleet is being fixed properly by
+  federation. The half that runs on a developer's own machine is growing at the same rate with the
+  same dotfile underneath it.</p>
+
+  <p>That gap may narrow — extending SPIFFE-style identity down to development machines is an
+  obvious direction, and if it happens cleanly, much of this argument expires. It has not happened
+  yet.</p>
+
+  <div class="card">
+    <p><strong>Disclosure.</strong> I build <a href="./">ValetFS</a>, which is one attempt at the
+    three properties above: secrets live on your phone behind Face ID, a daemon on your computer
+    borrows them into memory and never writes them to disk, and when you close the app a grace
+    timer expires and the daemon wipes itself. The daemon, the CLI and the relay protocol are
+    open source and free; an iOS app sells the convenience of managing it, not access to it.</p>
+    <p>I am not claiming it closes the process-memory window described above. It does not. It
+    removes the durable copy and puts the authority somewhere the compromised machine cannot
+    reach, which is a smaller claim and, I think, the honest one.</p>
+  </div>
+
+  <footer>ValetFS ·
+    <a href="./">Home</a> ·
+    <a href="https://github.com/WinM2M/valet-fs">Source</a> ·
+    <a href="./support.html">Support</a>
+  </footer>
+</div>
+</body>
+</html>

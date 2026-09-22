@@ -1,11 +1,30 @@
-# ValetFS Desktop Daemon (`valetfs`)
+# ValetFS — keep API keys on your phone, not in a dotfile
 
-ValetFS is a Zero-Backend, P2P, in-memory virtual file system that exposes
-short-lived tokens and keys to AI agents only while a paired mobile app
-allows it.
+Your API keys stay on your phone, behind Face ID. When a tool or an AI agent on
+your computer needs one, the `valetfs` daemon borrows it — into memory, never
+onto disk — and gives it back when the work is done. Close the app and a grace
+timer starts; when it expires the daemon unmounts and wipes itself.
 
-This repository contains the Go implementation of the desktop daemon plus
-a Cloudflare Worker signaling stub.
+Nothing is left in a dotfile, an environment variable or a config directory for
+the next prompt injection to find.
+
+```sh
+valetfs serve                                 # prints a QR code — scan it with the app
+valetfs exec fs:/keys/aws.env -- aws s3 ls    # use a secret without ever reading it
+```
+
+**Why this exists.** Workload identity federation removed static keys from
+workloads that run inside a cloud, because those already have an identity to
+exchange for a short-lived token. A laptop, a home server and the container an
+agent runs in have none, so the practical advice for local agents is still
+"export it in your shell profile". [Where workload identity federation can't
+go](https://winm2m.github.io/valet-fs/federated-identity-gap.html) sets out the
+gap and, just as plainly, what this does not fix.
+
+Technically: a zero-backend, peer-to-peer, in-memory virtual file system that
+exposes short-lived tokens and keys to AI agents only while a paired mobile app
+allows it. This repository holds the Go daemon and a Cloudflare Worker signaling
+stub. MIT licensed; the iOS app is optional and sells convenience, not access.
 
 ## Using ValetFS from an AI agent
 
