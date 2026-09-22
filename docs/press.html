@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ValetFS — Press kit</title>
+<meta name="description" content="Press kit for ValetFS: facts, screenshots, icon, boilerplate and contact.">
+<link rel="stylesheet" href="./_style.css">
+<style>
+  .shots{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px}
+  .shots figure{margin:0;width:210px}
+  .shots img{width:100%;border-radius:12px;border:1px solid var(--line);display:block}
+  .shots figcaption{font-size:.85rem;color:var(--muted);margin-top:6px}
+  table{border-collapse:collapse;width:100%;margin-top:12px}
+  td,th{border-bottom:1px solid var(--line);padding:8px 6px;text-align:left;vertical-align:top}
+  th{width:34%;color:var(--muted);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <h1>ValetFS — Press kit</h1>
+    <p class="meta">Last updated 22 September 2026 · Everything here is free to use and quote.</p>
+    <p>ValetFS keeps a developer's API keys on their iPhone and lends them to a tool or an AI
+    agent on their computer — into memory, never onto disk — and takes them back when the work
+    is done.</p>
+  </div>
+
+  <h2>At a glance</h2>
+
+  <table>
+    <tr><th>App</th><td>ValetFS — <em>Lend API keys to AI agents</em></td></tr>
+    <tr><th>Platform</th><td>iPhone, iOS. Companion daemon runs on macOS and Linux</td></tr>
+    <tr><th>Category</th><td>Developer Tools</td></tr>
+    <tr><th>Price</th><td>Free. One-time in-app unlock "ValetFS Pro" at US$8.99 / ₩14,000. Not a subscription</td></tr>
+    <tr><th>Developer</th><td>Youngjune Kwon — one person</td></tr>
+    <tr><th>Languages</th><td>English, Korean, Japanese, Simplified Chinese, Spanish, French, Arabic</td></tr>
+    <tr><th>Licence</th><td>Daemon, CLI and relay protocol are open source under MIT. The iOS app is not</td></tr>
+    <tr><th>Accounts</th><td>None. No sign-up, no login, no analytics SDK, no advertising</td></tr>
+    <tr><th>App Store</th><td><a href="https://apps.apple.com/app/id6804526734">apps.apple.com/app/id6804526734</a></td></tr>
+    <tr><th>Source</th><td><a href="https://github.com/WinM2M/valet-fs">github.com/WinM2M/valet-fs</a></td></tr>
+    <tr><th>Contact</th><td><a href="mailto:yjkwon@winm2m.com">yjkwon@winm2m.com</a></td></tr>
+  </table>
+
+  <h2>What it is</h2>
+
+  <p>Handing an API key to a build tool or an AI coding agent normally means writing it into a
+  dotfile, an environment variable or a config directory, where it stays readable by everything
+  on that machine long after the job is finished. ValetFS inverts that. The keys live on the
+  phone, in the iOS Keychain behind Face ID. A small open-source daemon on the computer borrows
+  one into memory when it is needed, and closing the app starts a grace timer after which the
+  daemon unmounts and wipes itself.</p>
+
+  <p>Secrets are sealed on the phone for one specific daemon — protocol v2 is
+  <code>Noise_IK_25519_ChaChaPoly_SHA256</code> — so the relay that carries them sees only
+  ciphertext, and the developer cannot read them either.</p>
+
+  <h2>What it does not do</h2>
+
+  <p>Stated plainly so nobody has to discover it: while a secret is in use it still enters the
+  requesting process's memory, and nothing here closes that window. What changes is that no
+  durable copy is left on the machine, and the authority to hand a key over again lives on a
+  device the compromised machine cannot reach. ValetFS also does not stop an agent from misusing
+  a key it was legitimately given inside an approved window.</p>
+
+  <h2>Screenshots</h2>
+
+  <p class="meta">iPhone 6.9", 1320 × 2868. Click any image for the full-resolution PNG.</p>
+
+  <div class="shots">
+    <figure><a href="./media/press/01-home.png"><img src="./media/press/01-home.png" alt="The vault list with stored secrets and a paired daemon showing as online"></a><figcaption>Vault and paired daemons</figcaption></figure>
+    <figure><a href="./media/press/02-session.png"><img src="./media/press/02-session.png" alt="A session screen showing live daemon status and controls"></a><figcaption>Session status and controls</figcaption></figure>
+    <figure><a href="./media/press/03-new-secret.png"><img src="./media/press/03-new-secret.png" alt="Adding a new secret to the vault"></a><figcaption>Adding a secret</figcaption></figure>
+    <figure><a href="./media/press/04-pair.png"><img src="./media/press/04-pair.png" alt="Pairing with a daemon by scanning its QR code"></a><figcaption>Pairing with a daemon</figcaption></figure>
+  </div>
+
+  <h2>Icon</h2>
+
+  <p><a href="./media/icon.png">Download the app icon</a> — a phone frame enclosing a keyhole.
+  The key lives in your phone.</p>
+
+  <h2>Boilerplate</h2>
+
+  <div class="card">
+    <p>ValetFS is a two-part tool for developers. An open-source daemon runs on the computer; an
+    iPhone app holds the secrets. When a build tool or an AI agent needs an API key, the app lends
+    it into the computer's memory, never onto its disk, and takes it back when the session ends.
+    There is no account and no login, and every security function is free. ValetFS is made by
+    Youngjune Kwon, an independent developer.</p>
+  </div>
+
+  <h2>Background reading</h2>
+
+  <p><a href="./federated-identity-gap.html">Where workload identity federation can't go</a> —
+  why this exists: federated identity removed static API keys from cloud workloads this year, but
+  a laptop has no identity to federate, so the advice for local agents is still to export the key
+  in a shell profile.</p>
+
+  <footer>ValetFS ·
+    <a href="./">Home</a> ·
+    <a href="https://github.com/WinM2M/valet-fs">Source</a> ·
+    <a href="./privacy.html">Privacy</a> ·
+    <a href="./support.html">Support</a>
+  </footer>
+</div>
+</body>
+</html>
