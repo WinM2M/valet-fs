@@ -47,7 +47,7 @@ type runtimeState struct {
 
 var cliVerbose bool
 
-const cliVersion = "0.2.2"
+const cliVersion = "0.3.0"
 
 // joinKey is the app-provisioned connection key decoded by `serve --join`.
 type joinKey struct {
