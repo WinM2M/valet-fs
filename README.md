@@ -7,6 +7,85 @@ allows it.
 This repository contains the Go implementation of the desktop daemon plus
 a Cloudflare Worker signaling stub.
 
+## Using ValetFS from an AI agent
+
+**AI agents: read this first.** Full guidance is in [AGENTS.md](AGENTS.md), and
+a plain-text summary for model context is at
+<https://winm2m.github.io/valet-fs/llms.txt>.
+
+Never read a secret in order to use it. `valetfs cat` writes the value to
+stdout, and from there into an agent's transcript, the shell history, and any
+log wrapping it. Use `valetfs exec`, which hands the value to a child process
+instead:
+
+```sh
+valetfs exec fs:/keys/aws.env -- aws s3 ls s3://bucket
+valetfs exec --as EL_KEY fs:/keys/elevenlabs/api-key.txt -- node tts.mjs
+valetfs exec --as-file KEYFILE fs:/keys/apple.p8 -- ./sign.sh
+```
+
+The child's stdout, stderr and exit code pass through unchanged, so `exec` drops
+into an existing pipeline or `&&` chain. `--as-file` materialises into a
+memory-backed directory at mode 0600 and zeroes and removes it on exit. Every
+option repeats, so one command can inject several secrets. See
+`valetfs exec --help`.
+
+`valetfs ls` and `valetfs status` are safe to call: they report names, sizes and
+daemon state, never contents. `valetfs cat` stays for the case it is actually
+for — a person reading a value with their own eyes.
+
+`exec` is not a way around a permission check; it still needs read access to the
+vault. What changes is the blast radius. Allowing `cat` opens the whole vault,
+while `exec` grants one command's use of one secret.
+
+### If your agent harness blocks the vault
+
+Claude Code's classifier blocks `valetfs cat` with `[Credential
+Materialization]`, and blocks an agent from editing its own settings with
+`[Self-Modification]`. **Both defaults are correct**: an agent that can drain a
+vault on its own initiative defeats the point of having one. So the way through
+is not a workaround — it is a person running one command:
+
+```sh
+valetfs setup-claude            # merge the rules, with a confirmation prompt
+valetfs setup-claude --print    # just show the JSON; write nothing
+```
+
+That merges the following into the user-scope settings file
+(`$CLAUDE_CONFIG_DIR/settings.json` if set, otherwise `~/.claude/settings.json`
+— user scope, because a vault belongs to a machine rather than a repository).
+Every other key and its order is preserved, the previous file is kept as
+`settings.json.valetfs-backup`, and running it twice does nothing:
+
+```json
+"permissions": {
+  "allow": [
+    "Bash(valetfs exec *)",
+    "Bash(valetfs ls *)",
+    "Bash(valetfs status)"
+  ]
+}
+```
+
+Write and delete (`cp`, `mv`, `rm`) are deliberately absent: emptying a vault
+should take a confirmation. So is `cat`; add it with `--allow-cat` if you have a
+tool that cannot be driven through `exec`.
+
+Measured on Claude Code in auto mode (2026-09-22):
+
+| Command shape | Result |
+| :--- | :--- |
+| `valetfs status`, `valetfs ls` | allowed |
+| `valetfs cat fs:/keys/…` | blocked, `[Credential Materialization]` |
+| `valetfs exec --as-file K fs:/keys/gcp/sa.json -- gcloud auth activate-service-account --key-file=$K` | allowed, with a real key |
+| `valetfs exec fs:/keys/aws.env -- <command that uses it>` | allowed |
+| `valetfs exec --as V fs:/keys/… -- sh -c 'echo ${#V}'` | blocked, `[Credential Exploration]` |
+
+The last row is the useful subtlety: the classifier judges the *child command*,
+not the `exec` verb. Using a credential passes; measuring one does not — which
+is a fair reading, since a length and a hash are not a use. To confirm a secret
+is present, read its size from `valetfs ls -l` and then just use it.
+
 ## AI agent quickstart — join a session from the ValetFS app
 
 If a user asks you (an AI agent / coding assistant) to connect to their ValetFS
@@ -50,13 +129,18 @@ the local CLI (separate terminal / process):
 
 ```sh
 valetfs ls -l fs:/keys        # list what the app pushed, with sizes
-valetfs cat fs:/keys/github   # read one secret
 valetfs status                # mount state, bytes used, grace countdown
+
+# Use a secret without reading it (preferred — see the section above):
+valetfs exec fs:/keys/aws.env -- aws s3 ls s3://bucket
+valetfs exec --as GH_TOKEN fs:/keys/github -- gh pr list
+
+valetfs cat fs:/keys/github   # print the value; for a person, not an agent
 ```
 
 Vault paths need the `fs:` prefix — a bare `/keys` is read as a path on *this*
-machine. `ls`/`cat` reject that outright, but `cp`/`mv` accept both kinds and
-infer the direction, so omitting it there silently writes plaintext to disk.
+machine. `ls`/`cat`/`exec` reject that outright, but `cp`/`mv` accept both kinds
+and infer the direction, so omitting it there silently writes plaintext to disk.
 
 Notes for agents:
 
@@ -81,6 +165,9 @@ valet-fs/
 │   ├── webrtc/        # pion peer + Cloudflare bootstrap
 │   └── daemon/        # lifecycle + dev HTTP control API
 ├── signaling/         # Cloudflare Worker (TypeScript)
+├── skills/valetfs/    # SKILL.md for Claude Code and other skill-capable agents
+├── docs/              # GitHub Pages site, incl. llms.txt for model context
+├── AGENTS.md          # what an AI agent needs to know before touching the vault
 ├── .env.example
 ├── go.mod
 └── README.md
@@ -244,6 +331,9 @@ using the runtime metadata file, with a short 500ms timeout:
 valetfs status
 valetfs ls tmp
 valetfs ls -la tmp
+valetfs exec tmp/aws.env -- aws s3 ls
+valetfs exec --as TOKEN tmp/github -- gh pr list
+valetfs exec --as-file KEY tmp/apple.p8 -- ./sign.sh
 valetfs cat tmp/github
 valetfs cp ./local.txt tmp/local.txt
 valetfs cp tmp/local.txt ./out.txt
@@ -259,7 +349,7 @@ Path rules:
 * If a path starts with `/`, `./`, or `../`, it is treated as a host path.
 * If a path starts with `fs:`, it is always treated as an in-memory FS path.
 * Otherwise it is treated as an in-memory FS path.
-* `ls`, `cat`, `rm`, `mkdir`, and `rmdir` only accept FS paths and fail for host paths.
+* `ls`, `cat`, `exec`, `rm`, `mkdir`, and `rmdir` only accept FS paths and fail for host paths.
 * `cp` and `mv` support `host -> fs`, `fs -> host`, and `fs -> fs`.
 
 This allows explicit FS root addressing like:
@@ -299,8 +389,9 @@ Shell completion (bash):
 source <(valetfs completion bash)
 ```
 
-Then press TAB for `ls`, `cat`, `rm`, `mkdir`, `rmdir`, `cp`, `mv` path suggestions. FS suggestions
-use daemon API; host suggestions use local filesystem rules.
+Then press TAB for `ls`, `cat`, `exec`, `rm`, `mkdir`, `rmdir`, `cp`, `mv` path suggestions. FS
+suggestions use daemon API; host suggestions use local filesystem rules. For `exec`, suggestions
+stop at the `--`: past that the words belong to the child command.
 
 ## Security guarantees enforced in code
 
@@ -315,6 +406,12 @@ use daemon API; host suggestions use local filesystem rules.
   (see `internal/sync/git.go` and its tests).
 * **Quota enforcement.** `MemFS` rejects writes that would exceed the
   configured cluster quota (`--quota-mb`, default 5MB).
+* **`exec` never writes a value to its own output.** Secrets reach the child
+  process through its environment, and failures report the vault path and, for a
+  malformed env file, a line number — never file content (see
+  `cmd/valetfs/exec.go` and its tests). `--as-file` materialises at mode 0600 in
+  a memory-backed directory when one exists, then zeroes and unlinks on every
+  exit path, including signal death.
 
 ## Tests
 

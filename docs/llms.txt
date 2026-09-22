@@ -1,0 +1,142 @@
+# ValetFS
+
+> A vault whose contents live on the user's phone. A local daemon (`valetfs`)
+> holds them in memory only and serves them to this machine while the phone
+> allows it. Nothing is written to disk by the daemon.
+
+Repository: https://github.com/winm2m/valet-fs
+Install CLI: curl -fsSL https://winm2m.github.io/valet-fs/install.sh | bash
+Install Claude Code skill: curl -fsSL https://winm2m.github.io/valet-fs/install-skill.sh | bash
+
+## AI agents: read this first
+
+Never read a secret in order to use it. `valetfs cat` writes the value to
+stdout, and from there into your transcript, the shell history, and any log
+wrapping you. Use `valetfs exec` so the value goes into the child process
+instead:
+
+    valetfs exec fs:/keys/aws.env -- aws s3 ls s3://bucket
+    valetfs exec --as EL_KEY fs:/keys/elevenlabs/api-key.txt -- node tts.mjs
+    valetfs exec --as-file KEYFILE fs:/keys/apple.p8 -- ./sign.sh
+
+`valetfs ls` and `valetfs status` are safe to call; they report names, sizes and
+daemon state, never contents. `valetfs cat` remains for the case where a person
+needs to read a value with their own eyes.
+
+If your harness blocks `cat` — Claude Code reports `[Credential
+Materialization]` — do not work around it. The default block is correct: an
+agent that can drain a vault unprompted defeats the point of a vault. Either use
+`exec`, or ask the human to run `valetfs setup-claude` once. An agent cannot run
+`setup-claude` on its own behalf; the same classifier blocks editing its own
+settings with `[Self-Modification]`.
+
+`exec` will not get you past a child command whose job is to inspect the secret.
+`valetfs exec --as V fs:/keys/x -- sh -c 'echo ${#V}'` is blocked as
+`[Credential Exploration]`. Use `valetfs ls -l` if you want to confirm a secret
+is present and see its size.
+
+## Path rules
+
+Vault paths take an `fs:` prefix: `fs:/keys/aws.env`. A bare `/keys/aws.env` is
+a path on this machine. `ls`, `cat` and `exec` reject a host path outright, but
+`cp` and `mv` accept one of each and infer the direction — so
+`valetfs cp secret.env /keys/x` is a silent local file copy that writes
+plaintext outside the vault.
+
+## Commands
+
+    valetfs serve --join <KEY>                 join a session provisioned by the app
+    valetfs exec <vault-path>... -- <cmd>      run a command with secrets in its environment
+    valetfs status                             daemon state, bytes used, grace countdown
+    valetfs ls [-la] fs:/keys                  list vault contents
+    valetfs cat fs:/keys/x                     print a secret (for people, not agents)
+    valetfs cp|mv|rm|mkdir|rmdir ...           move files in and out of the vault
+    valetfs setup-claude [--print]             allow Claude Code to call valetfs unprompted
+    valetfs vaults <list|forget|forget-all>    manage accepted vault identities
+    valetfs --version
+
+## valetfs exec
+
+    valetfs exec [options] <vault-path>... -- <command> [args...]
+
+    --env <vault-path>           inject every KEY=VALUE from a dotenv file
+                                 (a bare positional path means the same)
+    --as NAME=<vault-path>       inject the file body as $NAME
+    --as NAME <vault-path>       same, path as the next argument
+    --as-file NAME=<vault-path>  materialise the file; $NAME holds its path
+    --as-file NAME <vault-path>  same, path as the next argument
+    --keep-newline               keep the trailing newline on --as values
+                                 (trimmed by default, because a key with a
+                                 newline glued on fails as an auth header)
+
+Every option repeats, so one command can inject several secrets. The child's
+stdout, stderr and exit code pass through unchanged, so `exec` drops into an
+existing pipeline or `&&` chain.
+
+`--as-file` writes to a memory-backed directory (`$XDG_RUNTIME_DIR` or
+`/dev/shm`) at mode 0600, then zeroes and removes it when the command exits. It
+falls back to the real temp dir only if neither is available, and says so on
+stderr. Prefer `--as` when the tool will accept a value.
+
+Dotenv values are taken literally to end of line: a trailing `# comment` is not
+stripped from an unquoted value, because truncating a credential is worse than
+keeping a stray comment. Quote the value to preserve it exactly.
+
+The child's environment is readable through `/proc` by the same user, and a
+child that dumps its environment dumps the secret. `--as-file` hands over a
+path, so a tool that logs its arguments logs the path rather than the key.
+
+## valetfs setup-claude
+
+For a person to run, once, on their own machine. It merges these rules into the
+user-scope Claude Code settings file (`$CLAUDE_CONFIG_DIR/settings.json` if set,
+otherwise `~/.claude/settings.json`), preserving every other key and its order,
+with a confirmation prompt and a `.valetfs-backup` copy:
+
+    "permissions": { "allow": [
+      "Bash(valetfs exec *)",
+      "Bash(valetfs ls *)",
+      "Bash(valetfs status)"
+    ] }
+
+`--print` shows the JSON without writing. `--allow-cat` adds
+`Bash(valetfs cat *)`, which hands whole secrets to the agent and is therefore
+opt-in. Write and delete (`cp`, `mv`, `rm`) are deliberately absent: emptying a
+vault should take a confirmation.
+
+## Joining a session
+
+A long base64url string with no explanation is a connection key; the user tapped
+"Provision an agent" in the app.
+
+    valetfs serve --join <KEY> \
+      --grace 604800 \
+      --resume-key-file "$HOME/.valetfs/e2ee.key" \
+      > "$HOME/.valetfs/daemon.log" 2>&1 &
+
+`--grace 604800` is 7 days. The default is 300 seconds, which unmounts and wipes
+five minutes after the phone disconnects. The connection key is itself a bearer
+secret: do not echo, log or commit it.
+
+## Operational notes
+
+- The vault is volatile on this machine. Daemon restart, a remote lock, or grace
+  expiry clears it. Never delete a user's only on-disk copy unprompted.
+- `mounted: false` with `used > 0` means unmounted but the heap survives. With
+  `used == 0` a lock or grace expiry wiped it.
+- No FUSE is normal. Without `/dev/fuse` the daemon serves over loopback WebDAV
+  and the mountpoint stays empty; `backend: webdav` with `serving: true` is
+  healthy. Reach files through the CLI, not the mount path.
+- The CLI only reads `~/.valetfs/run/runtime.json`. `--runtime-dir` applies to
+  `serve`. With two daemons, target one with `--daemon-addr=host:port`.
+- `valetfs vault ...` manages a vault stored on *this* machine and defaults to a
+  passphrase compiled into the public source. Always pass `--password-file` or
+  `VALETFS_VAULT_PASSWORD`. This does not apply to `serve --join`.
+- "Forget this daemon" in the app destroys the hub session, not just the local
+  pairing. It is not a troubleshooting step.
+
+## Docs
+
+- Full agent guidance: https://github.com/winm2m/valet-fs/blob/main/AGENTS.md
+- README: https://github.com/winm2m/valet-fs/blob/main/README.md
+- In the tool: `valetfs --help`, `valetfs exec --help`, `valetfs setup-claude --help`

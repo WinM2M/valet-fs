@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -112,7 +113,16 @@ func main() {
 				os.Exit(1)
 			}
 			return
-		case "stop", "status", "ls", "cat", "cp", "rm", "del", "mkdir", "rmdir", "mv", "completion", "__complete":
+		case "setup-claude":
+			if err := runSetupClaude(os.Args[2:]); err != nil {
+				_, _ = fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "help", "-h", "--help":
+			printUsage(os.Stdout)
+			return
+		case "exec", "stop", "status", "ls", "cat", "cp", "rm", "del", "mkdir", "rmdir", "mv", "completion", "__complete":
 			if err := runCLI(os.Args[1:]); err != nil {
 				_, _ = fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
@@ -120,7 +130,11 @@ func main() {
 			return
 		}
 	}
-	_, _ = fmt.Fprintln(os.Stderr, "usage: valetfs serve [options] | valetfs vault <subcommand> | valetfs vaults <list|forget> | valetfs <command>")
+	// An unrecognised command lands here, and so does a bare `valetfs`. Print
+	// the whole usage rather than one line: this is where an agent that has
+	// never seen the tool learns that `exec` exists and that `cat` is not the
+	// way to use a secret.
+	printUsage(os.Stderr)
 	os.Exit(1)
 }
 
@@ -505,6 +519,17 @@ func runCLI(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("missing command")
 	}
+	// Answer --help before touching the runtime state. Asking what a command
+	// does is not a reason to need a running daemon, and an agent that gets
+	// "Cannot connect to daemon" here never finds out that `exec` exists.
+	if wantsHelp(args[1:]) {
+		if args[0] == "exec" {
+			printExecHelp(os.Stdout)
+		} else {
+			printUsage(os.Stdout)
+		}
+		return nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -520,6 +545,8 @@ func runCLI(args []string) error {
 	base := "http://" + st.ControlAddr
 
 	switch args[0] {
+	case "exec":
+		return runExec(client, base, st.ControlToken, args[1:])
 	case "status":
 		resp, err := apiReq(client, base, st.ControlToken, http.MethodGet, "/status", nil, nil)
 		if err != nil {
@@ -950,6 +977,12 @@ func runComplete(client *http.Client, base, token string, args []string) error {
 	switch cmd {
 	case "ls", "cat", "del", "rm", "mkdir", "rmdir":
 		suggest = append(suggest, completeFSPath(client, base, token, cur)...)
+	case "exec":
+		// Only up to the `--`; after it the words belong to the child command,
+		// and guessing vault paths there would be wrong.
+		if !slices.Contains(args[1:], "--") {
+			suggest = append(suggest, completeFSPath(client, base, token, cur)...)
+		}
 	case "cp", "mv":
 		idx := len(args) - 1
 		if idx <= 1 {
@@ -1164,19 +1197,23 @@ func completeFSPath(client *http.Client, base, token, cur string) []string {
 }
 
 func printBashCompletion() {
-	_, _ = fmt.Fprint(os.Stdout, `# bash completion for valetd
-_valetd_complete() {
+	// The binary installs as `valetfs`; `valetd` is the name it had before the
+	// rename, and registering only that one is why `source <(valetfs
+	// completion bash)` has never actually completed anything. Register both.
+	_, _ = fmt.Fprint(os.Stdout, `# bash completion for valetfs
+_valetfs_complete() {
   local cur prev words cword
   _init_completion || return
   if [[ ${#words[@]} -le 2 ]]; then
-    COMPREPLY=( $(compgen -W "status ls cat cp mv rm mkdir rmdir completion" -- "$cur") )
+    COMPREPLY=( $(compgen -W "status exec ls cat cp mv rm mkdir rmdir setup-claude completion" -- "$cur") )
     return
   fi
   local suggestions
   suggestions=$("${words[0]}" __complete "${words[@]:1}")
   COMPREPLY=( $(compgen -W "$suggestions" -- "$cur") )
 }
-complete -F _valetd_complete valetd
+complete -F _valetfs_complete valetfs
+complete -F _valetfs_complete valetd
 `)
 }
 
@@ -1278,4 +1315,18 @@ func defaultAuthorizedVaultsPath() string {
 		return filepath.Join(home, ".valetfs", "authorized_vaults")
 	}
 	return "/tmp/valetfs-authorized_vaults"
+}
+
+// wantsHelp looks for -h/--help among a command's own arguments only. Anything
+// after a bare `--` belongs to a child command, whose --help is its business.
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if a == "-h" || a == "--help" {
+			return true
+		}
+	}
+	return false
 }

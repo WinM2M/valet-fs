@@ -301,10 +301,42 @@
       <code>go build -o valetfs ./cmd/valetfs</code>.
       Full details in the <a href="install.html">installation guide</a>.
     </p>
-    <h3>Reading secrets</h3>
+    <h3>Using secrets</h3>
     <pre><code>valetfs ls -l fs:/keys        # what the app pushed
-valetfs cat fs:/keys/github   # read one
-valetfs status                # mount state, bytes used, grace countdown</code></pre>
+valetfs status                # mount state, bytes used, grace countdown
+
+# Use a secret without reading it — the value goes into the child
+# process, not into your terminal or your agent's transcript.
+valetfs exec fs:/keys/aws.env -- aws s3 ls s3://bucket
+valetfs exec --as GH_TOKEN fs:/keys/github -- gh pr list
+valetfs exec --as-file KEY fs:/keys/apple.p8 -- ./sign.sh
+
+valetfs cat fs:/keys/github   # print it, for your own eyes</code></pre>
+    <p>
+      If your agent's harness refuses to let it read a credential, that refusal is doing its job
+      — an agent that can drain the vault unprompted makes the vault pointless. Reach for
+      <code>valetfs exec</code> first; it grants one command's use of one secret instead of opening
+      the whole vault. For the cases that need more, run <code>valetfs setup-claude</code> once on
+      your own machine.
+    </p>
+  </div>
+</section>
+
+<section id="agents">
+  <div class="wrap">
+    <h2>For AI agents</h2>
+    <p>
+      If you are an AI agent reading this: never read a secret in order to use it. Use
+      <code>valetfs exec &lt;vault-path&gt; -- &lt;command&gt;</code> so the value reaches the child
+      process rather than your transcript. <code>valetfs ls</code> and <code>valetfs status</code>
+      are safe to call.
+    </p>
+    <p>
+      The full contract is in
+      <a href="https://github.com/winm2m/valet-fs/blob/main/AGENTS.md">AGENTS.md</a>, as a
+      plain-text summary at <a href="llms.txt">llms.txt</a>, and inside the tool itself via
+      <code>valetfs --help</code> and <code>valetfs exec --help</code>.
+    </p>
   </div>
 </section>
 
@@ -327,6 +359,7 @@ valetfs status                # mount state, bytes used, grace countdown</code><
   <div class="wrap">
     <a href="ko.html">한국어</a>
     <a href="install.html">Installation guide</a>
+    <a href="llms.txt">For AI agents</a>
     <a href="https://github.com/winm2m/valet-fs">GitHub</a>
     <a href="support.html">Support</a>
     <a href="privacy.html">Privacy</a>
