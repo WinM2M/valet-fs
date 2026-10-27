@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What a full audit of our own code found</title>
+<meta name="description" content="A line-by-line audit of ValetFS v0.1.9 produced fourteen findings, four of them critical, and all of them traced back to one missing check. What they were, what changed, and what this audit is not.">
+<meta property="og:title" content="What a full audit of our own code found">
+<meta property="og:description" content="Fourteen findings, four critical, all branching from one root: authentication was entirely 'do you know the session ID'. Here is the table, the commits, and the part we cannot claim.">
+<meta property="og:type" content="article">
+<link rel="stylesheet" href="./_style.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <h1>What a full audit of our own code found</h1>
+    <p class="meta">27 October 2026 · Youngjune Kwon</p>
+    <p>A tool that asks you to keep your API keys in it should be able to say what it is
+    defending against, what it got wrong, and how you can check. This page is that. It
+    covers an audit of ValetFS v0.1.9 (<code>f8fba82</code>) begun on 8 September 2026,
+    which produced fourteen findings — four of them critical.</p>
+  </div>
+
+  <h2>Fourteen findings, one root</h2>
+
+  <p>The findings looked unrelated until they were laid out together. Then the shape was
+  obvious: <strong>authentication was entirely "do you know the session ID".</strong>
+  There was no code anywhere that verified the identity of the controller — the phone
+  holding the secrets. F1, F2b, F4 and F7 are all the same hole wearing different clothes.</p>
+
+  <p>That is the comparison worth making against the usual arrangement. A <code>.env</code>
+  file has a simple threat model: anything that can read the disk wins. ValetFS set out to
+  remove the resting copy, and for a while it replaced "can read the disk" with "knows a
+  session ID", which is better but not by as much as the design implied.</p>
+
+  <h2>The table</h2>
+
+  <table>
+    <tr><th>#</th><th>Finding</th><th>Severity</th><th>Fixed in</th></tr>
+    <tr><td>F1</td><td>Unauthenticated claim — the whole vault could be taken</td><td>Critical</td><td><code>4cdc35a</code> <code>f12536f</code></td></tr>
+    <tr><td>F2a</td><td>Unlimited <code>kx:hello</code> rekeying</td><td>Critical</td><td><code>649bcee</code></td></tr>
+    <tr><td>F2b</td><td>No vault identity — fixed with Noise IK</td><td>Critical</td><td><code>367a01f</code> <code>236132b</code> <code>c381e74</code></td></tr>
+    <tr><td>F3</td><td>Session DELETE unauthenticated — remote wipe</td><td>Critical</td><td><code>3a5afc9</code></td></tr>
+    <tr><td>F4</td><td>Presence frames could be forged</td><td>Critical</td><td><code>649bcee</code></td></tr>
+    <tr><td>F5</td><td>WebDAV fallback served without authentication</td><td>Critical</td><td><code>e0465d6</code></td></tr>
+    <tr><td>F6</td><td>Control token written to logs</td><td>Medium</td><td><code>e0465d6</code></td></tr>
+    <tr><td>F7</td><td>No replay or reflection defence</td><td>Medium</td><td><code>367a01f</code> — Noise nonce plus session binding</td></tr>
+    <tr><td>F8</td><td>Default passphrase present in public source</td><td>Medium</td><td>closed</td></tr>
+    <tr><td>F9</td><td>No memory hardening</td><td>Medium</td><td><code>53663c3</code></td></tr>
+    <tr><td>F10</td><td>Git fingerprints left behind after locking</td><td>Medium</td><td>closed</td></tr>
+    <tr><td>F11</td><td>No release integrity verification</td><td>Low</td><td><code>2255244</code></td></tr>
+    <tr><td>F12</td><td>Toolchain and dependencies from 2023</td><td>Low</td><td><code>75d0d9b</code> — reachable advisories 44 → 1</td></tr>
+    <tr><td>F13</td><td>Signalling TLS not enforced</td><td>Low</td><td><code>53663c3</code></td></tr>
+    <tr><td>F14</td><td><code>cp</code> path resolution confusion</td><td>Low</td><td><code>d79cbd8</code></td></tr>
+  </table>
+
+  <p>All fourteen are closed and were verified in production. One reachable dependency
+  advisory remains, in a legacy WebRTC path; it is the "1" in the F12 row.</p>
+
+  <h2>Where the tests are</h2>
+
+  <p>Several findings were attack shapes rather than bugs, so the fixes carry tests that
+  describe the attack. The repository has 23 Go test files; the ones that matter here are
+  <code>internal/noise/conformance_test.go</code> (handshake conformance),
+  <code>internal/session/transcript_test.go</code> and
+  <code>internal/session/authorized_test.go</code> (session binding and authorisation),
+  <code>internal/hub/relay_test.go</code> (what the relay will and will not forward), and
+  <code>internal/hardening/hardening_linux_test.go</code>.</p>
+
+  <h2>Release integrity</h2>
+
+  <p>F11 closed with a <code>SHA256SUMS</code> file covering every artefact, cosign keyless
+  signing, and build provenance. The installer verifies the checksum fail-closed. When
+  cosign is not present it says so plainly rather than implying a check it did not make —
+  a checksum that travelled from the same place as the binary is not a defence against a
+  tampered release. Setting <code>VALETFS_REQUIRE_SIGNATURE=1</code> turns that into a hard
+  failure.</p>
+
+  <p>The limit is worth stating: keyless signing binds to a workflow identity, so an
+  attacker who can change the release workflow can produce signatures that verify.</p>
+
+  <h2>What this audit is not</h2>
+
+  <p>It was not independent. It was a line-by-line review conducted by the author, in a
+  working session, with an AI assistant — not a third-party penetration test and not a
+  commissioned security review. ValetFS has had neither.</p>
+
+  <p>So read this page as what it is: the findings are specific, the commits are public and
+  you can read them, and the claim "fourteen findings, four critical, all closed" is
+  checkable by anyone who clones the repository. The claim "this code is secure" is not
+  made here, because nobody outside the project has tried to break it yet.</p>
+
+  <p>If you want to be that person, the source is below. A reproduction that fails is worth
+  more than a star.</p>
+
+  <footer>ValetFS ·
+    <a href="./">Home</a> ·
+    <a href="https://github.com/WinM2M/valet-fs">Source</a> ·
+    <a href="./support.html">Support</a> ·
+    <a href="https://secondtiger.com/ai-agent-keys.html">Where do your keys go when you hand them to an AI agent?</a>
+  </footer>
+</div>
+</body>
+</html>
