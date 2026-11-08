@@ -26,6 +26,8 @@ package session
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -60,6 +62,8 @@ type frame struct {
 	Sys string `json:"sys,omitempty"`
 	// NX is the handshake message number, "1" or "2".
 	NX string `json:"nx,omitempty"`
+	// KX is set on the retired v1 hello. It is recognised only to say so.
+	KX string `json:"kx,omitempty"`
 	// N is a transport frame.
 	N string `json:"n,omitempty"`
 	// M is the handshake payload for NX frames.
@@ -134,6 +138,9 @@ type Config struct {
 	// An error refuses the connection: a key that could not be recorded must not
 	// be accepted, or the next first contact is also a first contact.
 	OnPin func(pub []byte) error
+	// OnLegacyPeer is called when a peer opens with the retired v1 hello, which
+	// this daemon no longer answers. Without it that peer would see only silence.
+	OnLegacyPeer func()
 	// Random supplies the ephemeral key. Nil means crypto/rand, which is what
 	// production uses; it exists so a transcript can be reproduced exactly,
 	// which is how the app's independent implementation is checked against this
@@ -264,6 +271,10 @@ func (c *Conn) handle(b []byte) {
 	switch {
 	case f.Sys != "":
 		c.deliver(b)
+	case f.KX == "hello":
+		if !c.initiator && c.cfg.OnLegacyPeer != nil {
+			c.cfg.OnLegacyPeer()
+		}
 	case f.NX == "1":
 		c.readHandshake1(f)
 	case f.NX == "2":
@@ -465,6 +476,15 @@ func (c *Conn) Close() error           { return c.inner.Close() }
 
 // GenerateStatic makes a long-lived key pair for either end.
 func GenerateStatic() (noise.DHKey, error) { return suite.GenerateKeypair(nil) }
+
+// Fingerprint is a short, comparable name for a public key, for a person to
+// check against another screen: 80 bits of its SHA-256 in four groups. It is
+// what the daemon prints at startup and a CLI vault asks the user to confirm.
+func Fingerprint(pub []byte) string {
+	sum := sha256.Sum256(pub)
+	enc := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:10])
+	return enc[0:4] + "-" + enc[4:8] + "-" + enc[8:12] + "-" + enc[12:16]
+}
 
 // PubB64 renders a public key for transport in a QR or connection key.
 func PubB64(pub []byte) string { return base64.StdEncoding.EncodeToString(pub) }

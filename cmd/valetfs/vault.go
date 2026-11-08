@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anomalyco/valet-fs/internal/session"
 	"github.com/anomalyco/valet-fs/internal/vault"
 	"github.com/anomalyco/valet-fs/internal/webrtc"
 	"golang.org/x/term"
@@ -23,6 +24,8 @@ func runVault(args []string) error {
 	passwordFile := fs.String("password-file", "", "password file path")
 	passwordStdin := fs.Bool("password-stdin", false, "read the vault passphrase from stdin")
 	claimSecretFlag := fs.String("claim-secret", "", "claim secret for the session (from the daemon's pairing QR)")
+	daemonPubFlag := fs.String("daemon-pub", "", "the daemon's v2 public key (base64), obtained from the daemon rather than the hub")
+	daemonFPFlag := fs.String("daemon-fingerprint", "", "the daemon's identity fingerprint, as printed by the daemon at startup")
 	transportFlag := fs.String("transport", defaultVaultTransport(), "control-plane transport: ws (default)|webrtc")
 	verbose := fs.Bool("v", false, "verbose output")
 	fs.BoolVar(verbose, "verbose", false, "verbose output")
@@ -31,9 +34,15 @@ func runVault(args []string) error {
 	}
 	args = fs.Args()
 	if len(args) == 0 {
-		return fmt.Errorf("usage: valetfs vault <init|add|ls|rm|rekey|pair|sync|unmount|status>")
+		return fmt.Errorf("usage: valetfs vault <init|add|ls|rm|rekey|identity|pair|sync|unmount|status>")
 	}
 	vdir := *vdirFlag
+	target := func(signaling, sid string) vaultWSTarget {
+		return vaultWSTarget{
+			signaling: signaling, sid: sid, claimSecret: *claimSecretFlag, vdir: vdir,
+			daemonPub: *daemonPubFlag, daemonFP: *daemonFPFlag,
+		}
+	}
 	authMode := readVaultAuthMode(vdir)
 	vault.SetPassphraseProvider(func() string {
 		if *passwordFile != "" {
@@ -113,6 +122,16 @@ func runVault(args []string) error {
 			return fmt.Errorf("usage: valetfs vault rm <fs-path>")
 		}
 		return v.Remove(args[1])
+	case "identity":
+		// The key this vault presents to a daemon. The daemon accepts only
+		// identities on its authorized-vaults list (or the first one it meets,
+		// when the list is empty), so this is what to add there.
+		k, _, err := session.LoadOrGenerateStatic(filepath.Join(vdir, vaultIdentityFile))
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "vault identity: %s\nfingerprint:    %s\n", session.PubB64(k.Public), session.Fingerprint(k.Public))
+		return nil
 	case "pair":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: valetfs vault pair <session_id> [--signaling URL]")
@@ -126,7 +145,7 @@ func runVault(args []string) error {
 			}
 		}
 		if *transportFlag == "ws" {
-			return vaultWSPair(v, vdir, signaling, sid, *claimSecretFlag)
+			return vaultWSPair(v, target(signaling, sid))
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -184,7 +203,7 @@ func runVault(args []string) error {
 		if *transportFlag != "ws" {
 			return fmt.Errorf("lock requires --transport ws")
 		}
-		return vaultWSSimple(signaling, sid, "LOCK", *claimSecretFlag)
+		return vaultWSSimple(target(signaling, sid), "LOCK")
 	case "unmount":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: valetfs vault unmount <session_id> [--signaling URL]")
@@ -203,7 +222,7 @@ func runVault(args []string) error {
 			}
 		}
 		if *transportFlag == "ws" {
-			return vaultWSSimple(signaling, sid, "UNMOUNT", *claimSecretFlag)
+			return vaultWSSimple(target(signaling, sid), "UNMOUNT")
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -233,7 +252,7 @@ func runVault(args []string) error {
 			}
 		}
 		if *transportFlag == "ws" {
-			return vaultWSSync(v, signaling, sid, *claimSecretFlag)
+			return vaultWSSync(v, target(signaling, sid))
 		}
 		p, err := webrtc.NewController()
 		if err != nil {
@@ -271,7 +290,7 @@ func runVault(args []string) error {
 				}
 			}
 			if *transportFlag == "ws" {
-				return vaultWSStatus(signaling, sid, *claimSecretFlag)
+				return vaultWSStatus(target(signaling, sid))
 			}
 			p, err := webrtc.NewController()
 			if err != nil {
