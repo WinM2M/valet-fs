@@ -76,7 +76,10 @@ type Conn struct {
 	// Empty means "trust on first use": the first vault to complete a handshake
 	// is recorded, and a different one afterwards is refused.
 	authorised [][]byte
-	onPin      func(pub []byte)
+	onPin      func(pub []byte) error
+	// authMu makes "is the list empty, then pin" one step. Without it two
+	// handshakes racing on an empty list would both be treated as the first.
+	authMu sync.Mutex
 	// cfg is kept so a fresh handshake state can be built when the peer
 	// reconnects. The daemon's socket to the hub outlives many app
 	// connections, and each one is a new handshake.
@@ -128,7 +131,9 @@ type Config struct {
 	Authorised [][]byte
 	// OnPin is called with the peer's key when a daemon accepts one under
 	// trust-on-first-use, so the caller can persist it.
-	OnPin func(pub []byte)
+	// An error refuses the connection: a key that could not be recorded must not
+	// be accepted, or the next first contact is also a first contact.
+	OnPin func(pub []byte) error
 	// Random supplies the ephemeral key. Nil means crypto/rand, which is what
 	// production uses; it exists so a transcript can be reproduced exactly,
 	// which is how the app's independent implementation is checked against this
@@ -228,10 +233,19 @@ func (c *Conn) Err() error {
 }
 
 func (c *Conn) authorise(pub []byte) error {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
 	if len(c.authorised) == 0 {
+		// Trust on first use, exactly once for this connection: record the key
+		// and make it the whole list from here on. Leaving the list empty let
+		// every later handshake on the same socket count as the first, so a
+		// second, unrelated vault was pinned too.
 		if c.onPin != nil {
-			c.onPin(pub)
+			if err := c.onPin(pub); err != nil {
+				return fmt.Errorf("session: could not record the vault identity: %w", err)
+			}
 		}
+		c.authorised = [][]byte{append([]byte(nil), pub...)}
 		return nil
 	}
 	for _, a := range c.authorised {

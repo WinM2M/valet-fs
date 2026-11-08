@@ -104,3 +104,21 @@ func TestMemFSSnapshotIndependentCopy(t *testing.T) {
 		t.Fatalf("snapshot mutated source: %q", got)
 	}
 }
+
+func TestRejectedOverwriteLeavesTheExistingFileIntact(t *testing.T) {
+	m := New(8)
+	if err := m.Write("/a", []byte("1234"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := m.Version()
+	if err := m.Write("/a", []byte("123456789"), 0o600); err != ErrQuota {
+		t.Fatalf("expected ErrQuota, got %v", err)
+	}
+	got, err := m.Read("/a")
+	if err != nil || string(got) != "1234" {
+		t.Fatalf("a rejected write changed the file: %q %v", got, err)
+	}
+	if after := m.Version(); after != before {
+		t.Errorf("a rejected write advanced the version: %d -> %d", before, after)
+	}
+}

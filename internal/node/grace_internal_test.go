@@ -193,3 +193,61 @@ func TestSetGraceDoesNotArmIdleNode(t *testing.T) {
 	case <-time.After(120 * time.Millisecond):
 	}
 }
+
+// Presence frames come from the hub and are unauthenticated. Repeating one must
+// not push the deadline back; only real traffic from the vault may do that.
+func TestRepeatedOfflineNoticesDoNotExtendTheDeadline(t *testing.T) {
+	locked := make(chan struct{}, 1)
+	n := New(Config{
+		FS:      vfs.New(0),
+		Grace:   80 * time.Millisecond,
+		Lock:    func() { locked <- struct{}{} },
+		Mounted: func() bool { return true },
+	})
+	offline := []byte(`{"sys":"peer_offline","role":"vault"}`)
+	n.onData(offline)
+
+	stop := time.After(40 * time.Millisecond)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for done := false; !done; {
+		select {
+		case <-tick.C:
+			n.onData(offline)
+		case <-stop:
+			done = true
+		}
+	}
+	select {
+	case <-locked:
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("repeated offline notices kept pushing the lock deadline back")
+	}
+}
+
+// After the countdown has fired, a later offline notice must start a new one.
+func TestOfflineAfterAFiredCountdownArmsAgain(t *testing.T) {
+	locked := make(chan struct{}, 4)
+	n := New(Config{
+		FS:      vfs.New(0),
+		Grace:   30 * time.Millisecond,
+		Lock:    func() { locked <- struct{}{} },
+		Mounted: func() bool { return true },
+	})
+	offline := []byte(`{"sys":"peer_offline","role":"vault"}`)
+	n.onData(offline)
+	select {
+	case <-locked:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("first countdown never fired")
+	}
+	if _, armed, _ := n.GraceState(); armed {
+		t.Error("a countdown that already fired still reports as armed")
+	}
+	n.onData(offline)
+	select {
+	case <-locked:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("an offline notice after a fired countdown did not arm a new one")
+	}
+}

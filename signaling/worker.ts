@@ -523,7 +523,12 @@ export function isSystemFrame(message: string | ArrayBuffer): boolean {
   }
   try {
     const parsed = JSON.parse(text);
-    return !!parsed && typeof parsed === "object" && "sys" in parsed;
+    if (!parsed || typeof parsed !== "object") return false;
+    // Go's JSON decoder, which reads these frames on the other side, matches
+    // keys case-insensitively: "SYS" and "Sys" reach the same field as "sys",
+    // and so does "ſys" (U+017F folds to "s"). An exact-name test here let all
+    // of those through as app payload. Upper-casing folds the same letters.
+    return Object.keys(parsed).some((k) => k.toUpperCase() === "SYS");
   } catch {
     return false; // not JSON: opaque app payload, relay it
   }
