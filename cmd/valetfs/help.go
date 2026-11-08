@@ -21,7 +21,7 @@ usage:
   valetfs cp|mv|rm|mkdir|rmdir ...         move files in and out of the vault
   valetfs setup-claude [--print]           let Claude Code call valetfs unprompted
   valetfs vault <subcommand>               manage a vault stored on this machine
-  valetfs vaults <list|forget|forget-all>  manage the identities this daemon accepts
+  valetfs vaults <list|authorize|forget>   manage the identities this daemon accepts
   valetfs completion bash                  shell completion
   valetfs --version
 

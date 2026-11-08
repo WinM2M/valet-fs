@@ -80,7 +80,7 @@ func vaultWSDial(t vaultWSTarget) (transport.Conn, *rpc.Client, error) {
 	if err := vc.Start(ctx); err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("handshake with the daemon failed (is this vault's identity authorised there? "+
-			"run `valetfs vault identity` and add it to the daemon's authorized vaults): %w", err)
+			"run `valetfs vault identity` here, then `valetfs vaults authorize <that key>` on the daemon's machine): %w", err)
 	}
 	if err := verifyProtocol(cl, info.Versions); err != nil {
 		_ = vc.Close()

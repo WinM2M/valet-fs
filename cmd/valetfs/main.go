@@ -1251,7 +1251,7 @@ func runVaults(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return fmt.Errorf("usage: valetfs vaults <list|forget <pubkey>|forget-all>")
+		return fmt.Errorf("usage: valetfs vaults <list|authorize <pubkey> [label]|forget <pubkey>|forget-all>")
 	}
 	av, err := session.OpenAuthorizedVaults(*path)
 	if err != nil {
@@ -1268,6 +1268,38 @@ func runVaults(args []string) error {
 		}
 		for _, e := range entries {
 			_, _ = fmt.Fprintln(os.Stdout, e)
+		}
+		return nil
+
+	case "authorize":
+		// The other half of "forget": let a vault in without waiting for it to be
+		// the first to connect. It is how a second vault (a CLI vault next to the
+		// phone) gets onto a daemon that already pinned one.
+		if len(rest) < 2 {
+			return fmt.Errorf("usage: valetfs vaults authorize <pubkey> [label]   (the key is printed by `valetfs vault identity`)")
+		}
+		pub, err := session.ParsePub(rest[1])
+		if err != nil {
+			return fmt.Errorf("not a vault public key: %w", err)
+		}
+		label := strings.TrimSpace(strings.Join(rest[2:], " "))
+		if label == "" {
+			label = session.DefaultLabel(time.Now())
+		}
+		had := len(av.List())
+		already := av.Has(pub)
+		if err := av.Add(pub, label); err != nil {
+			return err
+		}
+		if already {
+			_, _ = fmt.Fprintf(os.Stdout, "already authorised (%s).\n", session.Fingerprint(pub))
+			return nil
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "authorised %s (%s). Restart the daemon for it to take effect.\n", session.Fingerprint(pub), *path)
+		if had == 0 {
+			_, _ = fmt.Fprintln(os.Stdout,
+				"Note: nothing was pinned before, so this is now the ONLY vault the daemon accepts. A phone that "+
+					"has not connected yet will be refused until its identity is authorised too.")
 		}
 		return nil
 

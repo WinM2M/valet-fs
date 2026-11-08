@@ -341,7 +341,8 @@ Daemon identity fingerprint: ABCD-EFGH-IJKL-MNOP
 ```
 
 ```sh
-valetfs vault identity                       # this vault's key; add it to the daemon's authorized vaults
+valetfs vault identity                       # this vault's key
+valetfs vaults authorize <that key> [label]  # on the daemon's machine, then restart the daemon
 valetfs vault pair <SESSION_ID> --claim-secret <SECRET> --daemon-fingerprint ABCD-EFGH-IJKL-MNOP
 ```
 
