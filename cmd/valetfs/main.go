@@ -379,16 +379,17 @@ func serve(args []string) {
 					SessionID:  sid,
 					Static:     staticKey,
 					Authorised: auth,
-					OnPin: func(pub []byte) {
+					OnPin: func(pub []byte) error {
 						// Trust on first use, and only when nothing was
 						// authorised: record it so a restart is not another
 						// first contact.
 						if err := authorized.Add(pub, session.DefaultLabel(time.Now())); err != nil {
 							log.Printf("valetd: could not record the vault identity: %v", err)
-							return
+							return err
 						}
 						log.Printf("valetd: pinned vault identity %s (edit %s to change)",
 							session.PubB64(pub), cfg.AuthorizedVaultsFile)
+						return nil
 					},
 				},
 				OnChoose: func(v int) {

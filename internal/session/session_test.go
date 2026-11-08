@@ -148,7 +148,7 @@ func TestTrustOnFirstUseReportsThePinnedKey(t *testing.T) {
 	v, _ := NewVault(Config{Inner: vp, SessionID: "sid-1", Static: vk, PeerStatic: dk.Public})
 	d, _ := NewDaemon(Config{
 		Inner: dp, SessionID: "sid-1", Static: dk,
-		OnPin: func(pub []byte) { pinned = append([]byte(nil), pub...) },
+		OnPin: func(pub []byte) error { pinned = append([]byte(nil), pub...); return nil },
 	})
 	if err := v.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -158,6 +158,61 @@ func TestTrustOnFirstUseReportsThePinnedKey(t *testing.T) {
 	}
 	if !subtleEqual(pinned, vk.Public) {
 		t.Fatal("the accepted key was not reported for pinning")
+	}
+}
+
+// The first vault is pinned for the connection, not just written to a file: a
+// different vault arriving later on the same daemon socket must be refused, and
+// must not be recorded as a second first contact.
+func TestSecondVaultAfterTrustOnFirstUseIsRefused(t *testing.T) {
+	first, second, dk := mustKey(t), mustKey(t), mustKey(t)
+	var pins [][]byte
+	vp, dp := newPipe()
+	d, _ := NewDaemon(Config{
+		Inner: dp, SessionID: "sid-1", Static: dk,
+		OnPin: func(pub []byte) error { pins = append(pins, append([]byte(nil), pub...)); return nil },
+	})
+	v1, _ := NewVault(Config{Inner: vp, SessionID: "sid-1", Static: first, PeerStatic: dk.Public})
+	if err := v1.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Established() {
+		t.Fatal("first vault should be accepted")
+	}
+
+	v2, _ := NewVault(Config{Inner: vp, SessionID: "sid-1", Static: second, PeerStatic: dk.Public})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = v2.Start(ctx) // a refused vault never becomes ready; the deadline ends the wait
+	if d.Established() && subtleEqual(d.PeerStatic(), second.Public) {
+		t.Fatal("a second, unrelated vault was accepted on the same connection")
+	}
+	if !errors.Is(d.Err(), ErrUnauthorised) {
+		t.Fatalf("want ErrUnauthorised, got %v", d.Err())
+	}
+	if len(pins) != 1 || !subtleEqual(pins[0], first.Public) {
+		t.Fatalf("only the first vault may be pinned, got %d pins", len(pins))
+	}
+}
+
+// If the identity cannot be recorded the connection is refused rather than
+// accepted unrecorded, which would make the next vault a first contact too.
+func TestPinFailureRefusesTheConnection(t *testing.T) {
+	vk, dk := mustKey(t), mustKey(t)
+	vp, dp := newPipe()
+	d, _ := NewDaemon(Config{
+		Inner: dp, SessionID: "sid-1", Static: dk,
+		OnPin: func([]byte) error { return errors.New("disk full") },
+	})
+	v, _ := NewVault(Config{Inner: vp, SessionID: "sid-1", Static: vk, PeerStatic: dk.Public})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = v.Start(ctx)
+	if d.Established() {
+		t.Fatal("a vault whose identity could not be recorded was accepted")
+	}
+	if d.Err() == nil {
+		t.Fatal("the refusal should be reported")
 	}
 }
 

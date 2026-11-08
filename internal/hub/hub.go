@@ -251,8 +251,15 @@ func isSystemFrame(data []byte) bool {
 	if json.Unmarshal(data, &probe) != nil {
 		return false // not JSON, or not an object: opaque app payload, relay it
 	}
-	_, ok := probe["sys"]
-	return ok
+	// encoding/json, which decodes these frames on the receiving side, matches
+	// keys case-insensitively with Unicode folding, so "SYS" and "ſys" reach the
+	// same field as "sys". Test the same way or those pass as app payload.
+	for k := range probe {
+		if strings.EqualFold(k, "sys") {
+			return true
+		}
+	}
+	return false
 }
 
 func sendPresence(ws *websocket.Conn, sys, role string) {

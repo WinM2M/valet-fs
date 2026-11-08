@@ -1,10 +1,10 @@
 package vault
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -38,8 +38,24 @@ func SetPassphraseProvider(fn func() string) {
 	}
 }
 
+// manifestMagic opens a manifest written by this version: magic, 16-byte salt,
+// then the AES-GCM ciphertext. Keeping the salt next to the ciphertext it
+// unlocks is what lets Rekey commit with one atomic rename. Older manifests
+// have no magic and keep their salt in salt.bin; they are still read.
+var manifestMagic = []byte("VFSM2\n")
+
+const saltLen = 16
+
+// beforeRekeyCommit is a test seam: it runs after every new blob is written and
+// before the manifest rename that makes them live.
+var beforeRekeyCommit func() error
+
 type Entry struct {
-	Path     string    `json:"path"`
+	Path string `json:"path"`
+	// BlobSHA names the blob file. Older vaults used the SHA-256 of the
+	// plaintext, which let anyone holding the directory test a guess against the
+	// file names without the passphrase. New blobs get a random name; the field
+	// keeps its old JSON key so existing manifests still load.
 	BlobSHA  string    `json:"blob_sha"`
 	Size     int64     `json:"size"`
 	Mode     uint32    `json:"mode"`
@@ -64,9 +80,9 @@ type Vault struct {
 	// unprotected records that the passphrase is empty, so the key is derived
 	// from the salt alone and the directory decrypts itself.
 	unprotected bool
-	// saltOverride lets Rekey encrypt under a new salt before that salt is
-	// committed to disk.
-	saltOverride []byte
+	// salt is the salt in force for this handle: read from the manifest header,
+	// from the legacy salt.bin, or chosen by Rekey before it is committed.
+	salt []byte
 }
 
 func Open(dir string) (*Vault, error) {
@@ -106,8 +122,10 @@ func (v *Vault) UsesLegacyPassphrase() bool { return v.legacy }
 func (v *Vault) IsUnprotected() bool { return v.unprotected }
 
 // Rekey re-encrypts every blob and the manifest under a new passphrase and a
-// fresh salt. It writes the new blobs before swapping the salt, so an
-// interrupted rekey leaves the old vault readable rather than half-converted.
+// fresh salt. New blobs get new names and the manifest, which now carries the
+// salt, is replaced by a single rename. Until that rename the old manifest, salt
+// and blobs are untouched, so an interrupted rekey leaves the old vault
+// readable rather than half-converted.
 func (v *Vault) Rekey(newPass string) error {
 	if newPass == "" {
 		return fmt.Errorf("rekey: refusing to rekey to an empty passphrase")
@@ -126,29 +144,59 @@ func (v *Vault) Rekey(newPass string) error {
 		plain[path] = b
 	}
 
-	newSalt := make([]byte, 16)
+	newSalt := make([]byte, saltLen)
 	if _, err := rand.Read(newSalt); err != nil {
 		return err
 	}
-	next := &Vault{Dir: v.Dir, mf: v.mf, pass: newPass, saltOverride: newSalt}
+	next := &Vault{Dir: v.Dir, mf: Manifest{Entries: make(map[string]Entry, len(v.mf.Entries))}, pass: newPass, salt: newSalt}
 
+	var written []string
+	cleanup := func() {
+		for _, id := range written {
+			_ = os.Remove(v.blobPath(id))
+		}
+	}
 	for path, body := range plain {
-		e := v.mf.Entries[path]
+		id, err := newBlobID()
+		if err != nil {
+			cleanup()
+			return err
+		}
 		enc, err := next.encrypt(body)
 		if err != nil {
+			cleanup()
 			return fmt.Errorf("rekey: encrypt %s: %w", path, err)
 		}
-		if err := os.WriteFile(filepath.Join(v.Dir, "blobs", e.BlobSHA+".bin"), enc, 0o600); err != nil {
+		if err := writeFileAtomic(v.blobPath(id), enc, 0o600); err != nil {
+			cleanup()
 			return fmt.Errorf("rekey: write %s: %w", path, err)
 		}
+		written = append(written, id)
+		e := v.mf.Entries[path]
+		e.BlobSHA = id
+		next.mf.Entries[path] = e
 	}
 
-	// Commit: the salt is what makes the new blobs readable, so it lands last.
-	if err := os.WriteFile(filepath.Join(v.Dir, "salt.bin"), newSalt, 0o600); err != nil {
-		return fmt.Errorf("rekey: write salt: %w", err)
+	if beforeRekeyCommit != nil {
+		if err := beforeRekeyCommit(); err != nil {
+			cleanup()
+			return err
+		}
 	}
-	v.pass, v.legacy, v.unprotected, v.saltOverride = newPass, false, false, newSalt
-	return v.saveManifest()
+	// Commit point: one rename swaps the manifest and the salt together.
+	if err := next.saveManifest(); err != nil {
+		cleanup()
+		return fmt.Errorf("rekey: commit manifest: %w", err)
+	}
+
+	old := v.mf.Entries
+	v.pass, v.legacy, v.unprotected, v.salt, v.mf = newPass, false, false, newSalt, next.mf
+	// The new generation is live. What is left of the old one is garbage.
+	for _, e := range old {
+		_ = os.Remove(v.blobPath(e.BlobSHA))
+	}
+	_ = os.Remove(filepath.Join(v.Dir, "salt.bin"))
+	return nil
 }
 
 func (v *Vault) Add(hostPath, fsPath string) error {
@@ -156,31 +204,113 @@ func (v *Vault) Add(hostPath, fsPath string) error {
 	if err != nil {
 		return err
 	}
-	h := sha256.Sum256(b)
-	sha := hex.EncodeToString(h[:])
+	id, err := newBlobID()
+	if err != nil {
+		return err
+	}
 	enc, err := v.encrypt(b)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(v.Dir, "blobs", sha+".bin"), enc, 0o600); err != nil {
+	if err := writeFileAtomic(v.blobPath(id), enc, 0o600); err != nil {
 		return err
 	}
 	st, _ := os.Stat(hostPath)
 	p := normalizeFSPath(fsPath)
+	prev, had := v.mf.Entries[p]
 	v.mf.Entries[p] = Entry{
 		Path:     p,
-		BlobSHA:  sha,
+		BlobSHA:  id,
 		Size:     int64(len(b)),
 		Mode:     uint32(st.Mode().Perm()),
 		Modified: time.Now().UTC(),
 	}
-	return v.saveManifest()
+	if err := v.saveManifest(); err != nil {
+		if had {
+			v.mf.Entries[p] = prev
+		} else {
+			delete(v.mf.Entries, p)
+		}
+		_ = os.Remove(v.blobPath(id))
+		return err
+	}
+	if had {
+		v.dropBlobIfUnreferenced(prev.BlobSHA)
+	}
+	return nil
 }
 
 func (v *Vault) Remove(fsPath string) error {
 	p := normalizeFSPath(fsPath)
+	prev, had := v.mf.Entries[p]
 	delete(v.mf.Entries, p)
-	return v.saveManifest()
+	if err := v.saveManifest(); err != nil {
+		if had {
+			v.mf.Entries[p] = prev
+		}
+		return err
+	}
+	if had {
+		v.dropBlobIfUnreferenced(prev.BlobSHA)
+	}
+	return nil
+}
+
+func (v *Vault) blobPath(id string) string {
+	return filepath.Join(v.Dir, "blobs", id+".bin")
+}
+
+// dropBlobIfUnreferenced deletes a blob no manifest entry points at. Older
+// vaults named blobs by content hash, so two paths with equal content shared one.
+func (v *Vault) dropBlobIfUnreferenced(id string) {
+	for _, e := range v.mf.Entries {
+		if e.BlobSHA == id {
+			return
+		}
+	}
+	_ = os.Remove(v.blobPath(id))
+}
+
+func newBlobID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// writeFileAtomic writes to a temporary file in the same directory, syncs it,
+// then renames it over the target, so a crash leaves the old file or the new
+// one and never half of either.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 func (v *Vault) List(prefix string) []Entry {
@@ -200,7 +330,7 @@ func (v *Vault) Read(fsPath string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("not found: %s", fsPath)
 	}
-	b, err := os.ReadFile(filepath.Join(v.Dir, "blobs", e.BlobSHA+".bin"))
+	b, err := os.ReadFile(v.blobPath(e.BlobSHA))
 	if err != nil {
 		return nil, err
 	}
@@ -222,8 +352,24 @@ func (v *Vault) loadManifest() error {
 	if len(b) == 0 {
 		return nil
 	}
-	plain := b
-	if len(b) > 0 && b[0] != '{' {
+	var plain []byte
+	switch {
+	case bytes.HasPrefix(b, manifestMagic):
+		if len(b) < len(manifestMagic)+saltLen {
+			return fmt.Errorf("manifest truncated")
+		}
+		v.salt = append([]byte(nil), b[len(manifestMagic):len(manifestMagic)+saltLen]...)
+		dec, derr := v.decrypt(b[len(manifestMagic)+saltLen:])
+		if derr != nil {
+			return derr
+		}
+		plain = dec
+	case b[0] == '{' && json.Valid(b):
+		// A manifest from before encryption existed. Checking the first byte
+		// alone mistook one encrypted manifest in 256 for this, because the
+		// first byte of the ciphertext is a random nonce byte.
+		plain = b
+	default:
 		dec, derr := v.decrypt(b)
 		if derr != nil {
 			return derr
@@ -244,11 +390,19 @@ func (v *Vault) saveManifest() error {
 	if err != nil {
 		return err
 	}
+	salt, err := v.saltBytes()
+	if err != nil {
+		return err
+	}
 	enc, err := v.encrypt(b)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(v.Dir, "manifest.json"), enc, 0o600)
+	out := make([]byte, 0, len(manifestMagic)+len(salt)+len(enc))
+	out = append(out, manifestMagic...)
+	out = append(out, salt...)
+	out = append(out, enc...)
+	return writeFileAtomic(filepath.Join(v.Dir, "manifest.json"), out, 0o600)
 }
 
 func normalizeFSPath(p string) string {
@@ -269,9 +423,11 @@ func (v *Vault) passphrase() string {
 	return v.pass
 }
 
-func (v *Vault) deriveKey() ([]byte, error) {
-	if v.saltOverride != nil {
-		return argon2.IDKey([]byte(v.passphrase()), v.saltOverride, 3, 64*1024, 1, 32), nil
+// saltBytes returns the salt for this handle. A vault from before the manifest
+// carried its salt keeps it in salt.bin, which is created on first use.
+func (v *Vault) saltBytes() ([]byte, error) {
+	if v.salt != nil {
+		return v.salt, nil
 	}
 	saltPath := filepath.Join(v.Dir, "salt.bin")
 	salt, err := os.ReadFile(saltPath)
@@ -279,16 +435,24 @@ func (v *Vault) deriveKey() ([]byte, error) {
 		if !os.IsNotExist(err) {
 			return nil, err
 		}
-		salt = make([]byte, 16)
+		salt = make([]byte, saltLen)
 		if _, err := rand.Read(salt); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(saltPath, salt, 0o600); err != nil {
+		if err := writeFileAtomic(saltPath, salt, 0o600); err != nil {
 			return nil, err
 		}
 	}
-	key := argon2.IDKey([]byte(v.passphrase()), salt, 3, 64*1024, 1, 32)
-	return key, nil
+	v.salt = salt
+	return salt, nil
+}
+
+func (v *Vault) deriveKey() ([]byte, error) {
+	salt, err := v.saltBytes()
+	if err != nil {
+		return nil, err
+	}
+	return argon2.IDKey([]byte(v.passphrase()), salt, 3, 64*1024, 1, 32), nil
 }
 
 func (v *Vault) encrypt(plain []byte) ([]byte, error) {

@@ -133,6 +133,9 @@ await test("forged presence frames are never relayed", async () => {
     '{"role":"vault","sys":"peer_offline"}',   // key order is the sender's choice
     '{"pad":"aaaaaaaaaaaaaaaa","sys":"peer_offline"}', // padding buys nothing
     '{"sys":null}',
+    '{"SYS":"peer_offline","ROLE":"vault"}',     // Go's decoder ignores key case
+    '{"Sys":"peer_offline","role":"vault"}',
+    '{"\u017fys":"peer_offline","role":"vault"}', // long s folds to s
   ];
   for (const f of forged) {
     assert.ok(isSystemFrame(f), `relayed a forged frame: ${f}`);

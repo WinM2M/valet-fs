@@ -134,9 +134,22 @@ func (n *MemoryNode) onData(b []byte) {
 
 // --- grace timer (authoritative) ---
 
-func (n *MemoryNode) startGrace() {
+// startGrace arms the countdown if none is running. It never moves a deadline
+// that is already ticking: the frames that call it are unauthenticated presence
+// from the hub, and a sender who could push the deadline back by repeating them
+// could keep secrets mounted long after the phone went away.
+func (n *MemoryNode) startGrace() { n.armGrace(false) }
+
+// restartGrace re-arms the countdown from now, for a change the operator made.
+func (n *MemoryNode) restartGrace() { n.armGrace(true) }
+
+func (n *MemoryNode) armGrace(restart bool) {
 	n.mu.Lock()
 	if n.grace != nil {
+		if !restart {
+			n.mu.Unlock()
+			return
+		}
 		n.grace.Stop()
 		n.grace = nil
 	}
@@ -149,11 +162,21 @@ func (n *MemoryNode) startGrace() {
 		}
 		return
 	}
-	n.grace = time.AfterFunc(d, func() {
+	var t *time.Timer
+	t = time.AfterFunc(d, func() {
+		// The countdown is over: it is no longer running, so a later offline
+		// notice must be able to arm a new one.
+		n.mu.Lock()
+		if n.grace == t {
+			n.grace = nil
+			n.graceEnd = time.Time{}
+		}
+		n.mu.Unlock()
 		if lock != nil {
 			lock()
 		}
 	})
+	n.grace = t
 	n.graceEnd = time.Now().Add(d)
 	n.mu.Unlock()
 }
@@ -200,8 +223,8 @@ func (n *MemoryNode) SetGrace(d time.Duration) {
 	rearm := n.grace != nil
 	n.mu.Unlock()
 	if rearm {
-		// startGrace takes the same lock, so it must be called unlocked.
-		n.startGrace()
+		// restartGrace takes the same lock, so it must be called unlocked.
+		n.restartGrace()
 	}
 }
 
