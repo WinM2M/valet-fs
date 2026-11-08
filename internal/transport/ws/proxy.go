@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -11,19 +12,29 @@ import (
 	"net/url"
 	"time"
 
+	"golang.org/x/net/http/httpproxy"
 	"golang.org/x/net/websocket"
 )
+
+// proxyRootCAs overrides the trust roots used to verify an HTTPS proxy. Nil
+// means the system roots; only tests set it.
+var proxyRootCAs *x509.CertPool
+
+// dialTimeout bounds the whole connection setup: TCP connect, proxy TLS,
+// CONNECT, hub TLS and the WebSocket handshake share one deadline.
+const dialTimeout = 30 * time.Second
 
 // dialWebSocket follows the same proxy environment as the hub's HTTP requests.
 // Mapping ws(s) to http(s) makes HTTPS_PROXY, HTTP_PROXY and NO_PROXY apply.
 func dialWebSocket(endpoint, origin string) (*websocket.Conn, error) {
 	cfg, err := websocket.NewConfig(endpoint, origin)
 	if err != nil {
-		return nil, fmt.Errorf("invalid WebSocket configuration")
+		return nil, fmt.Errorf("invalid WebSocket hub URL or origin")
 	}
 	proxyURL, err := webSocketProxy(cfg.Location)
 	if err != nil {
-		return nil, fmt.Errorf("WebSocket proxy configuration is invalid")
+		// The underlying error can quote the proxy URL, credentials included.
+		return nil, fmt.Errorf("WebSocket proxy configuration is invalid; check HTTPS_PROXY, HTTP_PROXY and NO_PROXY")
 	}
 	return dialWebSocketConfig(cfg, proxyURL)
 }
@@ -35,14 +46,18 @@ func webSocketProxy(location *url.URL) (*url.URL, error) {
 	} else {
 		proxyTarget.Scheme = "http"
 	}
-	return http.ProxyFromEnvironment(&http.Request{URL: &proxyTarget})
+	// Read the environment on every call rather than through
+	// http.ProxyFromEnvironment, which snapshots it once per process. The rules
+	// are the same; a connection made after the environment changes sees the
+	// change, and tests do not depend on which code touched the cache first.
+	return httpproxy.FromEnvironment().ProxyFunc()(&proxyTarget)
 }
 
 func dialWebSocketConfig(cfg *websocket.Config, proxyURL *url.URL) (*websocket.Conn, error) {
-	const timeout = 30 * time.Second
+	deadline := time.Now().Add(dialTimeout)
 	if proxyURL == nil {
-		cfg.Dialer = &net.Dialer{Timeout: timeout}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		cfg.Dialer = &net.Dialer{Deadline: deadline}
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
 		defer cancel()
 		conn, err := cfg.DialContext(ctx)
 		if dialErr, ok := err.(*websocket.DialError); ok {
@@ -52,7 +67,7 @@ func dialWebSocketConfig(cfg *websocket.Config, proxyURL *url.URL) (*websocket.C
 		return conn, err
 	}
 	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported WebSocket proxy scheme %q", proxyURL.Scheme)
+		return nil, fmt.Errorf("unsupported WebSocket proxy scheme %q: only http and https proxies are supported", proxyURL.Scheme)
 	}
 	target := cfg.Location.Host
 	if cfg.Location.Port() == "" {
@@ -70,7 +85,7 @@ func dialWebSocketConfig(cfg *websocket.Config, proxyURL *url.URL) (*websocket.C
 		}
 		proxyAddr = net.JoinHostPort(proxyURL.Hostname(), port)
 	}
-	conn, err := net.DialTimeout("tcp", proxyAddr, timeout)
+	conn, err := (&net.Dialer{Deadline: deadline}).Dial("tcp", proxyAddr)
 	if err != nil {
 		return nil, fmt.Errorf("connect to WebSocket proxy: %w", err)
 	}
@@ -80,9 +95,9 @@ func dialWebSocketConfig(cfg *websocket.Config, proxyURL *url.URL) (*websocket.C
 			_ = conn.Close()
 		}
 	}()
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	_ = conn.SetDeadline(deadline)
 	if proxyURL.Scheme == "https" {
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: proxyURL.Hostname()})
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: proxyURL.Hostname(), RootCAs: proxyRootCAs})
 		conn = tlsConn
 		if err := tlsConn.Handshake(); err != nil {
 			return nil, fmt.Errorf("WebSocket proxy TLS: %w", err)

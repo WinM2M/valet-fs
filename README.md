@@ -199,6 +199,11 @@ The WebSocket transport follows `HTTPS_PROXY` for `wss://` hubs and
 supported lowercase equivalents). HTTP and HTTPS proxies use CONNECT;
 TLS certificates are verified for both the hub and an HTTPS proxy.
 Proxy rejection fails the connection without falling back to a direct dial.
+Only `http://` and `https://` proxies are supported, with Basic authentication
+taken from the proxy URL (`http://user:pass@proxy:8080`); a `socks5://` proxy or
+one that requires NTLM or Kerberos fails the connection instead of being
+bypassed. Connection setup (TCP, proxy and hub TLS, WebSocket handshake) shares
+a single 30-second deadline.
 The local control API and WebDAV remain on loopback.
 
 ## Build
