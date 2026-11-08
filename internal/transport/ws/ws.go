@@ -296,13 +296,33 @@ func PublishPub(hubURL, sessionID, token, pubB64, pubV2B64 string) error {
 	return nil
 }
 
+// ControllerInfo is what the hub reports about the daemon when a vault claims
+// the session. None of it is authenticated: the hub relays it and could have
+// changed it, so a caller that needs the daemon's identity must check it
+// against something that did not travel through the hub.
+type ControllerInfo struct {
+	DaemonPub   string // X25519 key of the retired v1 protocol; may be empty
+	DaemonPubV2 string // Noise static key, base64; may be empty
+	Versions    []int
+}
+
 // DialController claims an existing session and connects as the vault role. It
 // also returns the daemon's published X25519 public key (base64; may be empty
 // if the daemon did not enable E2EE) and the protocol versions the hub says the
 // daemon supports. Both come from the hub and neither is trusted on its own.
 func DialController(hubURL, sessionID, claimSecret string) (*Conn, string, []int, error) {
-	if err := checkHubURL(hubURL); err != nil {
+	c, info, err := DialControllerInfo(hubURL, sessionID, claimSecret)
+	if err != nil {
 		return nil, "", nil, err
+	}
+	return c, info.DaemonPub, info.Versions, nil
+}
+
+// DialControllerInfo is DialController with everything the hub said about the
+// daemon, including its v2 key.
+func DialControllerInfo(hubURL, sessionID, claimSecret string) (*Conn, ControllerInfo, error) {
+	if err := checkHubURL(hubURL); err != nil {
+		return nil, ControllerInfo{}, err
 	}
 	var resp struct {
 		ControllerToken string `json:"controller_token"`
@@ -313,20 +333,20 @@ func DialController(hubURL, sessionID, claimSecret string) (*Conn, string, []int
 	if err := postJSONWithHeader(
 		fmt.Sprintf("%s/ws/sessions/%s/claim", hubURL, sessionID),
 		"X-Valet-Claim-Secret", claimSecret, nil, &resp); err != nil {
-		return nil, "", nil, err
+		return nil, ControllerInfo{}, err
 	}
 	c, err := dialWS(hubURL, sessionID, "vault", resp.ControllerToken)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, ControllerInfo{}, err
 	}
-	return c, resp.DaemonPub, resp.Versions, nil
+	return c, ControllerInfo{DaemonPub: resp.DaemonPub, DaemonPubV2: resp.DaemonPubV2, Versions: resp.Versions}, nil
 }
 
 func dialWS(hubURL, sid, role, token string) (*Conn, error) {
 	wsURL := toWSScheme(hubURL) + "/ws/connect?sid=" + url.QueryEscape(sid) +
 		"&role=" + url.QueryEscape(role) + "&token=" + url.QueryEscape(token)
 	origin := strings.TrimSuffix(hubURL, "/")
-	c, err := websocket.Dial(wsURL, "", origin)
+	c, err := dialWebSocket(wsURL, origin)
 	if err != nil {
 		return nil, err
 	}

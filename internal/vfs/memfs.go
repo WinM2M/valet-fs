@@ -205,12 +205,16 @@ func (m *MemFS) Write(p string, data []byte, mode fs.FileMode) error {
 			return ErrIsDir
 		}
 		oldSize = int64(len(existing.Data))
-		// Wipe old buffer before drop.
-		zeroBytes(existing.Data)
 	}
 	newSize := int64(len(data))
+	// Refuse before touching anything: a write the quota rejects must leave the
+	// existing file exactly as it was.
 	if m.quota > 0 && m.used-oldSize+newSize > m.quota {
 		return ErrQuota
+	}
+	if existing, ok := parent.Children[name]; ok {
+		// Wipe old buffer before drop.
+		zeroBytes(existing.Data)
 	}
 	buf := make([]byte, len(data))
 	copy(buf, data)

@@ -14,11 +14,16 @@
 <div class="wrap">
   <div class="hero">
     <h1>What a full audit of our own code found</h1>
-    <p class="meta">27 October 2026 · Youngjune Kwon</p>
+    <p class="meta">27 October 2026 · updated 8 November 2026 · Youngjune Kwon</p>
     <p>A tool that asks you to keep your API keys in it should be able to say what it is
     defending against, what it got wrong, and how you can check. This page is that. It
     covers an audit of ValetFS v0.1.9 (<code>f8fba82</code>) begun on 8 September 2026,
     which produced fourteen findings — four of them critical.</p>
+    <p><strong>Update, 8 November 2026.</strong> A second review, by a different reader,
+    found that one of those fixes was incomplete and turned up eight more problems. It is
+    written up <a href="#second-review">below</a>. Fixes are on <code>main</code> and ship in
+    v0.4.0 (tagged 8 November 2026; check the releases page for the signed build);
+    <strong>v0.3.1 and earlier still have them.</strong></p>
   </div>
 
   <h2>Fourteen findings, one root</h2>
@@ -41,7 +46,7 @@
     <tr><td>F2a</td><td>Unlimited <code>kx:hello</code> rekeying</td><td>Critical</td><td><code>649bcee</code></td></tr>
     <tr><td>F2b</td><td>No vault identity — fixed with Noise IK</td><td>Critical</td><td><code>367a01f</code> <code>236132b</code> <code>c381e74</code></td></tr>
     <tr><td>F3</td><td>Session DELETE unauthenticated — remote wipe</td><td>Critical</td><td><code>3a5afc9</code></td></tr>
-    <tr><td>F4</td><td>Presence frames could be forged</td><td>Critical</td><td><code>649bcee</code></td></tr>
+    <tr><td>F4</td><td>Presence frames could be forged</td><td>Critical</td><td><code>649bcee</code> — incomplete, see <a href="#second-review">R3</a></td></tr>
     <tr><td>F5</td><td>WebDAV fallback served without authentication</td><td>Critical</td><td><code>e0465d6</code></td></tr>
     <tr><td>F6</td><td>Control token written to logs</td><td>Medium</td><td><code>e0465d6</code></td></tr>
     <tr><td>F7</td><td>No replay or reflection defence</td><td>Medium</td><td><code>367a01f</code> — Noise nonce plus session binding</td></tr>
@@ -54,8 +59,49 @@
     <tr><td>F14</td><td><code>cp</code> path resolution confusion</td><td>Low</td><td><code>d79cbd8</code></td></tr>
   </table>
 
-  <p>All fourteen are closed and were verified in production. One reachable dependency
-  advisory remains, in a legacy WebRTC path; it is the "1" in the F12 row.</p>
+  <p>All fourteen were closed at the time and checked against the paths that were tested.
+  That turned out to be narrower than it sounds: the F4 fix stopped a forged
+  <code>sys</code> frame but not a differently-cased one (R3 below). One reachable
+  dependency advisory also remains, in a legacy WebRTC path; it is the "1" in the F12 row.</p>
+
+  <h2 id="second-review">A second review, and what it reopened</h2>
+
+  <p>Twelve days after the first write-up, another AI model was given the public source and
+  asked to find what the first audit missed. It reported nine items. I checked each one
+  against the code before acting on it. Each had a real basis; two were less severe than
+  the reviewer reported, and the severities below are mine. They are listed by how the fix is shipped, not by who found
+  them first.</p>
+
+  <table>
+    <tr><th>#</th><th>Finding</th><th>Severity (author's)</th><th>Status</th></tr>
+    <tr><td>R1</td><td>A peer could choose the old v1 protocol, which pins no vault identity, even when a vault identity was configured</td><td>High</td><td>Fixed: v1 is no longer served — <code>49a7501</code></td></tr>
+    <tr><td>R2</td><td>The first vault was pinned in a file but not for the live connection, so a second, unrelated vault was accepted on the same socket and recorded too</td><td>High</td><td>Fixed — <code>086bfd2</code></td></tr>
+    <tr><td>R3</td><td>The relay's filter for forged presence frames matched <code>sys</code> exactly, while the daemon's JSON decoder matches keys case-insensitively, so <code>SYS</code> or <code>Sys</code> got through; repeated offline notices also pushed the auto-lock deadline back each time (F4 revisited)</td><td>Medium</td><td>Fixed — <code>086bfd2</code></td></tr>
+    <tr><td>R4</td><td>The one-time claim secret in the QR could be presented again after the first claim and returned the same live session token</td><td>Medium</td><td><strong>Open.</strong> Fixing it needs the app to keep its role token instead of re-claiming.</td></tr>
+    <tr><td>R5</td><td>CLI vault blob files were named by the SHA-256 of their plaintext, so anyone holding the directory could test a guess without the passphrase</td><td>Low–Medium</td><td>Fixed for new blobs — <code>086bfd2</code>. Existing blobs are renamed by running <code>vault rekey</code>.</td></tr>
+    <tr><td>R6</td><td>An interrupted rekey could leave the CLI vault unreadable under either passphrase</td><td>Medium (availability)</td><td>Fixed — <code>086bfd2</code></td></tr>
+    <tr><td>R7</td><td>About one encrypted manifest in 256 began with the byte that marked a plaintext manifest, and failed to open as "wrong passphrase"</td><td>Low–Medium (availability)</td><td>Fixed — <code>086bfd2</code></td></tr>
+    <tr><td>R8</td><td>A write rejected for exceeding the memory quota had already zeroed the existing file</td><td>Low (integrity)</td><td>Fixed — <code>086bfd2</code></td></tr>
+    <tr><td>R9</td><td>The CLI vault took the daemon's key from the hub, which is not trusted with it, and fell back to plaintext when no key was given</td><td>Medium</td><td>Fixed: v2 only, daemon key checked against a fingerprint or a pinned key — <code>49a7501</code></td></tr>
+  </table>
+
+  <p>R1, R2 and R3 are the same root as the first audit — who is the other end of this
+  connection — which is why they were findable in code that had already been through it.
+  R1 and R2 need access to the relay path (a hostile relay, or a stolen vault-role token); they
+  are not "anyone who knows a session ID". That is a smaller group than before and not an
+  empty one.</p>
+
+  <p>What is still weak after these fixes, stated so nobody has to find it:</p>
+  <ul>
+    <li><strong>R4 is open.</strong> Anyone who photographed the pairing QR can still obtain a
+    session token. Once a vault identity is pinned, that token cannot read secrets, but it can
+    replace the app's socket or delete the session.</li>
+    <li>The CLI vault asks you to compare the daemon's fingerprint on first use. If you
+    do not compare it, you are trusting the hub for that one step.</li>
+    <li>When the daemon is started from a connection key (the reverse flow), the app learns the
+    daemon's key from the hub rather than from something it scanned. A hostile hub could
+    substitute its own.</li>
+  </ul>
 
   <h2>Where the tests are</h2>
 
@@ -85,9 +131,13 @@
   working session, with an AI assistant — not a third-party penetration test and not a
   commissioned security review. ValetFS has had neither.</p>
 
+  <p>The second review was not independent either: it was another AI model reading the
+  public source, with the author checking every finding against the code afterwards. Neither
+  round was a third-party penetration test.</p>
+
   <p>So read this page as what it is: the findings are specific, the commits are public and
-  you can read them, and the claim "fourteen findings, four critical, all closed" is
-  checkable by anyone who clones the repository. The claim "this code is secure" is not
+  you can read them, and the claim "fourteen findings, four critical, all closed at the time"
+  is checkable by anyone who clones the repository. The claim "this code is secure" is not
   made here, because nobody outside the project has tried to break it yet.</p>
 
   <p>If you want to be that person, the source is below. A reproduction that fails is worth

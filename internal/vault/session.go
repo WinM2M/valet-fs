@@ -9,11 +9,14 @@ import (
 )
 
 type SessionRecord struct {
-	SessionID       string    `json:"session_id"`
-	SignalingURL    string    `json:"signaling_url"`
-	ControllerToken string    `json:"controller_token,omitempty"`
-	PairedAt        time.Time `json:"paired_at"`
-	LastSeen        time.Time `json:"last_seen"`
+	SessionID       string `json:"session_id"`
+	SignalingURL    string `json:"signaling_url"`
+	ControllerToken string `json:"controller_token,omitempty"`
+	// DaemonPubV2 is the daemon's Noise key as confirmed when the session was
+	// first used. Later connections must see the same key.
+	DaemonPubV2 string    `json:"daemon_pub_v2,omitempty"`
+	PairedAt    time.Time `json:"paired_at"`
+	LastSeen    time.Time `json:"last_seen"`
 }
 
 func SaveSession(vaultDir string, rec SessionRecord) error {

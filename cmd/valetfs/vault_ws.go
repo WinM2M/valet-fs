@@ -1,59 +1,165 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/anomalyco/valet-fs/internal/e2ee"
+	"golang.org/x/term"
+
 	"github.com/anomalyco/valet-fs/internal/rpc"
+	"github.com/anomalyco/valet-fs/internal/session"
 	"github.com/anomalyco/valet-fs/internal/transport"
 	"github.com/anomalyco/valet-fs/internal/transport/ws"
 	"github.com/anomalyco/valet-fs/internal/vault"
 )
 
-// vaultWSDial claims and connects to a session over the WebSocket hub (Durable
-// Object), returning a ready rpc.Client. If the daemon published an E2EE public
-// key, the connection is end-to-end encrypted (the hub sees only ciphertext).
-func vaultWSDial(signaling, sid, claimSecret string) (transport.Conn, *rpc.Client, error) {
-	conn, daemonPub, hubVersions, err := ws.DialController(signaling, sid, claimSecret)
+// vaultWSTarget names the session a CLI vault command talks to and what it may
+// trust about the daemon at the other end.
+type vaultWSTarget struct {
+	signaling, sid, claimSecret string
+	vdir                        string
+	// daemonPub and daemonFP are the daemon's identity as the person got it
+	// from the daemon itself, not from the hub: a base64 key or the short
+	// fingerprint the daemon prints at startup. Either one is enough.
+	daemonPub, daemonFP string
+}
+
+// vaultWSDial claims the session over the hub and opens a v2 session with the
+// daemon, returning a ready rpc.Client.
+//
+// The hub is not trusted with the daemon's identity. The key it reports is
+// accepted only if it matches what the person supplied (--daemon-pub or
+// --daemon-fingerprint), what this vault recorded the first time it used the
+// session, or what the person confirms at a prompt. There is no fallback to an
+// unauthenticated channel: if any of that fails, nothing is sent.
+func vaultWSDial(t vaultWSTarget) (transport.Conn, *rpc.Client, error) {
+	conn, info, err := ws.DialControllerInfo(t.signaling, t.sid, t.claimSecret)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ws connect: %w", err)
+	}
+	fail := func(format string, a ...any) (transport.Conn, *rpc.Client, error) {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf(format, a...)
 	}
 	// The hub's version list is unauthenticated. Negotiating against it is fine
 	// as an opening bid, but the CLI vault re-checks it against what the daemon
 	// reports over the encrypted channel; see verifyProtocol.
-	if v := rpc.Negotiate(hubVersions, 0); len(hubVersions) > 0 && v == 0 {
+	if v := rpc.Negotiate(info.Versions, 0); len(info.Versions) > 0 && v == 0 {
+		return fail("no shared protocol version with this daemon (it offers %v, this build speaks %v)",
+			info.Versions, rpc.Supported)
+	}
+	if info.DaemonPubV2 == "" {
+		return fail("this daemon does not publish a v2 identity; update it (the unauthenticated v1 protocol is no longer spoken)")
+	}
+	hubPub, err := session.ParsePub(info.DaemonPubV2)
+	if err != nil {
+		return fail("the hub reported an unusable daemon key: %v", err)
+	}
+	if err := confirmDaemonIdentity(t, hubPub); err != nil {
+		return fail("%v", err)
+	}
+	static, _, err := session.LoadOrGenerateStatic(filepath.Join(t.vdir, vaultIdentityFile))
+	if err != nil {
+		return fail("vault identity: %v", err)
+	}
+	vc, err := session.NewVault(session.Config{
+		Inner: conn, SessionID: t.sid, Static: static, PeerStatic: hubPub,
+	})
+	if err != nil {
+		return fail("session: %v", err)
+	}
+	cl := rpc.NewClient(vc)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := vc.Start(ctx); err != nil {
 		_ = conn.Close()
-		return nil, nil, fmt.Errorf("no shared protocol version with this daemon (it offers %v, this build speaks %v)",
-			hubVersions, rpc.Supported)
+		return nil, nil, fmt.Errorf("handshake with the daemon failed (is this vault's identity authorised there? "+
+			"run `valetfs vault identity` here, then `valetfs vaults authorize <that key>` on the daemon's machine): %w", err)
 	}
-	if daemonPub != "" {
-		kp, err := e2ee.Generate()
-		if err != nil {
-			_ = conn.Close()
-			return nil, nil, fmt.Errorf("e2ee keygen: %w", err)
-		}
-		ec, err := e2ee.WrapController(conn, kp, daemonPub)
-		if err != nil {
-			_ = conn.Close()
-			return nil, nil, fmt.Errorf("e2ee handshake: %w", err)
-		}
-		cl := rpc.NewClient(ec)
-		ec.Start()
-		if err := verifyProtocol(cl, hubVersions); err != nil {
-			_ = ec.Close()
-			return nil, nil, err
-		}
-		return ec, cl, nil
+	if err := verifyProtocol(cl, info.Versions); err != nil {
+		_ = vc.Close()
+		return nil, nil, err
 	}
-	// Legacy / no-E2EE daemon: plaintext over the hub.
-	cl := rpc.NewClient(conn)
-	conn.Start()
-	return conn, cl, nil
+	rememberDaemon(t, hubPub)
+	return vc, cl, nil
+}
+
+// vaultIdentityFile holds this vault's long-lived Noise key inside the vault
+// directory.
+const vaultIdentityFile = "identity.key"
+
+// confirmDaemonIdentity decides whether the key the hub reported is the daemon's.
+func confirmDaemonIdentity(t vaultWSTarget, hubPub []byte) error {
+	if t.daemonPub != "" {
+		want, err := session.ParsePub(t.daemonPub)
+		if err != nil {
+			return fmt.Errorf("--daemon-pub: %w", err)
+		}
+		if !bytes.Equal(want, hubPub) {
+			return fmt.Errorf("the hub's daemon key does not match --daemon-pub; refusing (the hub may be substituting its own key)")
+		}
+		return nil
+	}
+	if t.daemonFP != "" {
+		if normaliseFingerprint(t.daemonFP) != normaliseFingerprint(session.Fingerprint(hubPub)) {
+			return fmt.Errorf("the hub's daemon key (fingerprint %s) does not match --daemon-fingerprint; refusing "+
+				"(the hub may be substituting its own key)", session.Fingerprint(hubPub))
+		}
+		return nil
+	}
+	if rec, err := vault.LoadSession(t.vdir, t.sid); err == nil && rec.DaemonPubV2 != "" {
+		if rec.DaemonPubV2 != session.PubB64(hubPub) {
+			return fmt.Errorf("the daemon's identity changed since this vault first used the session "+
+				"(was %s, now %s); refusing. If the daemon was reinstalled, pair again with a new session",
+				fingerprintOfB64(rec.DaemonPubV2), session.Fingerprint(hubPub))
+		}
+		return nil
+	}
+	// First contact, with nothing the hub did not supply. Ask a person.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("first use of this session: the daemon's identity must be confirmed. Pass " +
+			"--daemon-fingerprint <fingerprint> (printed by the daemon at startup) or --daemon-pub, or run from a terminal")
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "The hub says this daemon's identity fingerprint is\n\n    %s\n\n"+
+		"Compare it with the line \"Daemon identity fingerprint\" the daemon printed when it started. "+
+		"If they differ, the hub is not passing your connection through.\nTrust it? [y/N] ", session.Fingerprint(hubPub))
+	var answer string
+	_, _ = fmt.Fscanln(os.Stdin, &answer)
+	if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+		return fmt.Errorf("not confirmed; nothing was sent")
+	}
+	return nil
+}
+
+func normaliseFingerprint(s string) string {
+	return strings.ToUpper(strings.NewReplacer("-", "", " ", "", ":", "").Replace(strings.TrimSpace(s)))
+}
+
+func fingerprintOfB64(b64 string) string {
+	pub, err := session.ParsePub(b64)
+	if err != nil {
+		return "unknown"
+	}
+	return session.Fingerprint(pub)
+}
+
+// rememberDaemon records the daemon's key against the session after a handshake
+// that used it succeeded, so later runs can hold the daemon to the same key.
+func rememberDaemon(t vaultWSTarget, pub []byte) {
+	rec, err := vault.LoadSession(t.vdir, t.sid)
+	if err != nil || rec == nil {
+		now := time.Now().UTC()
+		rec = &vault.SessionRecord{SessionID: t.sid, SignalingURL: t.signaling, PairedAt: now, LastSeen: now}
+	}
+	rec.DaemonPubV2 = session.PubB64(pub)
+	rec.LastSeen = time.Now().UTC()
+	_ = vault.SaveSession(t.vdir, *rec)
 }
 
 func vaultWSCtx() (context.Context, context.CancelFunc) {
@@ -80,8 +186,8 @@ func vaultWSPushAll(cl *rpc.Client, v *vault.Vault) error {
 	return nil
 }
 
-func vaultWSPair(v *vault.Vault, vdir, signaling, sid, claimSecret string) error {
-	conn, cl, err := vaultWSDial(signaling, sid, claimSecret)
+func vaultWSPair(v *vault.Vault, t vaultWSTarget) error {
+	conn, cl, err := vaultWSDial(t)
 	if err != nil {
 		return err
 	}
@@ -89,16 +195,20 @@ func vaultWSPair(v *vault.Vault, vdir, signaling, sid, claimSecret string) error
 	if err := vaultWSPushAll(cl, v); err != nil {
 		return err
 	}
+	// vaultWSDial already recorded the daemon's key; keep it and stamp the pairing.
+	rec, lerr := vault.LoadSession(t.vdir, t.sid)
 	now := time.Now().UTC()
-	_ = vault.SaveSession(vdir, vault.SessionRecord{
-		SessionID: sid, SignalingURL: signaling, PairedAt: now, LastSeen: now,
-	})
+	if lerr != nil || rec == nil {
+		rec = &vault.SessionRecord{SessionID: t.sid}
+	}
+	rec.SignalingURL, rec.PairedAt, rec.LastSeen = t.signaling, now, now
+	_ = vault.SaveSession(t.vdir, *rec)
 	_, _ = fmt.Fprintln(os.Stdout, "paired and pushed vault entries (ws)")
 	return nil
 }
 
-func vaultWSSync(v *vault.Vault, signaling, sid, claimSecret string) error {
-	conn, cl, err := vaultWSDial(signaling, sid, claimSecret)
+func vaultWSSync(v *vault.Vault, t vaultWSTarget) error {
+	conn, cl, err := vaultWSDial(t)
 	if err != nil {
 		return err
 	}
@@ -110,8 +220,8 @@ func vaultWSSync(v *vault.Vault, signaling, sid, claimSecret string) error {
 	return nil
 }
 
-func vaultWSStatus(signaling, sid, claimSecret string) error {
-	conn, cl, err := vaultWSDial(signaling, sid, claimSecret)
+func vaultWSStatus(t vaultWSTarget) error {
+	conn, cl, err := vaultWSDial(t)
 	if err != nil {
 		return err
 	}
@@ -127,8 +237,8 @@ func vaultWSStatus(signaling, sid, claimSecret string) error {
 }
 
 // vaultWSSimple issues a single no-param method (UNMOUNT/LOCK) and reports.
-func vaultWSSimple(signaling, sid, method, claimSecret string) error {
-	conn, cl, err := vaultWSDial(signaling, sid, claimSecret)
+func vaultWSSimple(t vaultWSTarget, method string) error {
+	conn, cl, err := vaultWSDial(t)
 	if err != nil {
 		return err
 	}

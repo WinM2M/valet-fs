@@ -47,7 +47,7 @@ type runtimeState struct {
 
 var cliVerbose bool
 
-const cliVersion = "0.3.0"
+const cliVersion = "0.4.0"
 
 // joinKey is the app-provisioned connection key decoded by `serve --join`.
 type joinKey struct {
@@ -239,6 +239,9 @@ func serve(args []string) {
 		if reusedStatic {
 			log.Println("valetd: reusing the persisted v2 identity")
 		}
+		// A public fingerprint, safe in scrollback. A CLI vault asks the person
+		// to compare it, since the hub that relays the key is not trusted.
+		fmt.Printf("Daemon identity fingerprint: %s\n", session.Fingerprint(staticKey.Public))
 
 		authorized, err := session.OpenAuthorizedVaults(cfg.AuthorizedVaultsFile)
 		if err != nil {
@@ -365,47 +368,43 @@ func serve(args []string) {
 			_ = d.WipeHistory()
 		}
 		attach = func(raw *ws.Conn) {
-			// Which version this becomes is decided by the first frame the peer
-			// sends, not by anything agreed beforehand. Serving v1 as well is
-			// what keeps the shipped app working while v2 rolls out.
 			auth := joinAuthorized
 			if auth == nil {
 				auth = authorized.Keys()
 			}
-			dc := session.NewDual(session.DualConfig{
-				Inner:    raw,
-				V1Static: kp,
-				V2: session.Config{
-					SessionID:  sid,
-					Static:     staticKey,
-					Authorised: auth,
-					OnPin: func(pub []byte) {
-						// Trust on first use, and only when nothing was
-						// authorised: record it so a restart is not another
-						// first contact.
-						if err := authorized.Add(pub, session.DefaultLabel(time.Now())); err != nil {
-							log.Printf("valetd: could not record the vault identity: %v", err)
-							return
-						}
-						log.Printf("valetd: pinned vault identity %s (edit %s to change)",
-							session.PubB64(pub), cfg.AuthorizedVaultsFile)
-					},
-				},
-				OnChoose: func(v int) {
-					if v == 1 {
-						log.Println("valetd: peer opened a v1 session (unauthenticated controller); " +
-							"upgrade the app to get an authenticated one")
-						return
+			dc, err := session.NewDaemon(session.Config{
+				Inner:      raw,
+				SessionID:  sid,
+				Static:     staticKey,
+				Authorised: auth,
+				OnPin: func(pub []byte) error {
+					// Trust on first use, and only when nothing was
+					// authorised: record it so a restart is not another
+					// first contact.
+					if err := authorized.Add(pub, session.DefaultLabel(time.Now())); err != nil {
+						log.Printf("valetd: could not record the vault identity: %v", err)
+						return err
 					}
-					log.Println("valetd: peer opened a v2 session (mutually authenticated)")
+					log.Printf("valetd: pinned vault identity %s (edit %s to change)",
+						session.PubB64(pub), cfg.AuthorizedVaultsFile)
+					return nil
+				},
+				OnLegacyPeer: func() {
+					log.Println("valetd: a peer opened a v1 session and was ignored: v1 is no longer served " +
+						"(update the app or CLI)")
 				},
 			})
+			if err != nil {
+				log.Fatalf("valetd: session: %v", err)
+			}
 			n.Attach(dc)
 			dc.OnClose(func() {
 				log.Println("valetd: ws connection closed; attempting reconnect")
 				go reconnect()
 			})
-			dc.Start()
+			if err := dc.Start(context.Background()); err != nil {
+				log.Printf("valetd: session start: %v", err)
+			}
 		}
 		attach(rawConn)
 		if cfg.JoinKey != "" {
@@ -1252,7 +1251,7 @@ func runVaults(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return fmt.Errorf("usage: valetfs vaults <list|forget <pubkey>|forget-all>")
+		return fmt.Errorf("usage: valetfs vaults <list|authorize <pubkey> [label]|forget <pubkey>|forget-all>")
 	}
 	av, err := session.OpenAuthorizedVaults(*path)
 	if err != nil {
@@ -1269,6 +1268,38 @@ func runVaults(args []string) error {
 		}
 		for _, e := range entries {
 			_, _ = fmt.Fprintln(os.Stdout, e)
+		}
+		return nil
+
+	case "authorize":
+		// The other half of "forget": let a vault in without waiting for it to be
+		// the first to connect. It is how a second vault (a CLI vault next to the
+		// phone) gets onto a daemon that already pinned one.
+		if len(rest) < 2 {
+			return fmt.Errorf("usage: valetfs vaults authorize <pubkey> [label]   (the key is printed by `valetfs vault identity`)")
+		}
+		pub, err := session.ParsePub(rest[1])
+		if err != nil {
+			return fmt.Errorf("not a vault public key: %w", err)
+		}
+		label := strings.TrimSpace(strings.Join(rest[2:], " "))
+		if label == "" {
+			label = session.DefaultLabel(time.Now())
+		}
+		had := len(av.List())
+		already := av.Has(pub)
+		if err := av.Add(pub, label); err != nil {
+			return err
+		}
+		if already {
+			_, _ = fmt.Fprintf(os.Stdout, "already authorised (%s).\n", session.Fingerprint(pub))
+			return nil
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "authorised %s (%s). Restart the daemon for it to take effect.\n", session.Fingerprint(pub), *path)
+		if had == 0 {
+			_, _ = fmt.Fprintln(os.Stdout,
+				"Note: nothing was pinned before, so this is now the ONLY vault the daemon accepts. A phone that "+
+					"has not connected yet will be refused until its identity is authorised too.")
 		}
 		return nil
 

@@ -192,6 +192,20 @@ valet-fs/
 └── README.md
 ```
 
+## HTTP proxies
+
+The WebSocket transport follows `HTTPS_PROXY` for `wss://` hubs and
+`HTTP_PROXY` for `ws://` hubs, including `NO_PROXY` exclusions (and Go's
+supported lowercase equivalents). HTTP and HTTPS proxies use CONNECT;
+TLS certificates are verified for both the hub and an HTTPS proxy.
+Proxy rejection fails the connection without falling back to a direct dial.
+Only `http://` and `https://` proxies are supported, with Basic authentication
+taken from the proxy URL (`http://user:pass@proxy:8080`); a `socks5://` proxy or
+one that requires NTLM or Kerberos fails the connection instead of being
+bypassed. Connection setup (TCP, proxy and hub TLS, WebSocket handshake) shares
+a single 30-second deadline.
+The local control API and WebDAV remain on loopback.
+
 ## Build
 
 ```sh
@@ -316,6 +330,29 @@ valetfs vault pair <SESSION_ID>
 ```
 
 If `--signaling` is omitted in vault commands, the same default URL above is used.
+
+### Pairing the CLI vault over the hub (`--transport ws`)
+
+The hub relays your connection but is not trusted with the daemon's identity, so
+the CLI checks it another way. The daemon prints a fingerprint when it starts:
+
+```
+Daemon identity fingerprint: ABCD-EFGH-IJKL-MNOP
+```
+
+```sh
+valetfs vault identity                       # this vault's key
+valetfs vaults authorize <that key> [label]  # on the daemon's machine, then restart the daemon
+valetfs vault pair <SESSION_ID> --claim-secret <SECRET> --daemon-fingerprint ABCD-EFGH-IJKL-MNOP
+```
+
+Without `--daemon-fingerprint` (or `--daemon-pub`) the CLI shows the fingerprint
+the hub reported and asks you to compare it. Either way the daemon's key is then
+recorded for that session, and a later connection that presents a different key
+is refused. If the daemon has no vault authorized yet, the first vault to connect
+is trusted and recorded; any other must be added to the daemon's authorized
+vaults first. The unauthenticated v1 protocol is no longer served, so a daemon
+that does not publish a v2 identity is refused rather than reached in plaintext.
 
 After pairing, the vault file is pushed to Device A memory FS via WebRTC DataChannel.
 

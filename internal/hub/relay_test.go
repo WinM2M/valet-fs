@@ -15,6 +15,10 @@ func TestIsSystemFrameCatchesForgedPresence(t *testing.T) {
 		// Padding must not buy a bypass either.
 		[]byte(`{"pad":"` + string(make([]byte, 0)) + `aaaaaaaaaaaaaaaa","sys":"peer_offline","role":"vault"}`),
 		[]byte(`{"sys":null}`),
+		// The receiving decoder matches keys case-insensitively.
+		[]byte(`{"SYS":"peer_offline","ROLE":"vault"}`),
+		[]byte(`{"Sys":"peer_offline","role":"vault"}`),
+		[]byte("{\"\u017fys\":\"peer_offline\",\"role\":\"vault\"}"),
 	}
 	for _, f := range forged {
 		if !isSystemFrame(f) {
