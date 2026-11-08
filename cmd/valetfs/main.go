@@ -47,7 +47,7 @@ type runtimeState struct {
 
 var cliVerbose bool
 
-const cliVersion = "0.3.1"
+const cliVersion = "0.4.0"
 
 // joinKey is the app-provisioned connection key decoded by `serve --join`.
 type joinKey struct {
@@ -239,6 +239,9 @@ func serve(args []string) {
 		if reusedStatic {
 			log.Println("valetd: reusing the persisted v2 identity")
 		}
+		// A public fingerprint, safe in scrollback. A CLI vault asks the person
+		// to compare it, since the hub that relays the key is not trusted.
+		fmt.Printf("Daemon identity fingerprint: %s\n", session.Fingerprint(staticKey.Public))
 
 		authorized, err := session.OpenAuthorizedVaults(cfg.AuthorizedVaultsFile)
 		if err != nil {
@@ -365,48 +368,43 @@ func serve(args []string) {
 			_ = d.WipeHistory()
 		}
 		attach = func(raw *ws.Conn) {
-			// Which version this becomes is decided by the first frame the peer
-			// sends, not by anything agreed beforehand. Serving v1 as well is
-			// what keeps the shipped app working while v2 rolls out.
 			auth := joinAuthorized
 			if auth == nil {
 				auth = authorized.Keys()
 			}
-			dc := session.NewDual(session.DualConfig{
-				Inner:    raw,
-				V1Static: kp,
-				V2: session.Config{
-					SessionID:  sid,
-					Static:     staticKey,
-					Authorised: auth,
-					OnPin: func(pub []byte) error {
-						// Trust on first use, and only when nothing was
-						// authorised: record it so a restart is not another
-						// first contact.
-						if err := authorized.Add(pub, session.DefaultLabel(time.Now())); err != nil {
-							log.Printf("valetd: could not record the vault identity: %v", err)
-							return err
-						}
-						log.Printf("valetd: pinned vault identity %s (edit %s to change)",
-							session.PubB64(pub), cfg.AuthorizedVaultsFile)
-						return nil
-					},
-				},
-				OnChoose: func(v int) {
-					if v == 1 {
-						log.Println("valetd: peer opened a v1 session (unauthenticated controller); " +
-							"upgrade the app to get an authenticated one")
-						return
+			dc, err := session.NewDaemon(session.Config{
+				Inner:      raw,
+				SessionID:  sid,
+				Static:     staticKey,
+				Authorised: auth,
+				OnPin: func(pub []byte) error {
+					// Trust on first use, and only when nothing was
+					// authorised: record it so a restart is not another
+					// first contact.
+					if err := authorized.Add(pub, session.DefaultLabel(time.Now())); err != nil {
+						log.Printf("valetd: could not record the vault identity: %v", err)
+						return err
 					}
-					log.Println("valetd: peer opened a v2 session (mutually authenticated)")
+					log.Printf("valetd: pinned vault identity %s (edit %s to change)",
+						session.PubB64(pub), cfg.AuthorizedVaultsFile)
+					return nil
+				},
+				OnLegacyPeer: func() {
+					log.Println("valetd: a peer opened a v1 session and was ignored: v1 is no longer served " +
+						"(update the app or CLI)")
 				},
 			})
+			if err != nil {
+				log.Fatalf("valetd: session: %v", err)
+			}
 			n.Attach(dc)
 			dc.OnClose(func() {
 				log.Println("valetd: ws connection closed; attempting reconnect")
 				go reconnect()
 			})
-			dc.Start()
+			if err := dc.Start(context.Background()); err != nil {
+				log.Printf("valetd: session start: %v", err)
+			}
 		}
 		attach(rawConn)
 		if cfg.JoinKey != "" {

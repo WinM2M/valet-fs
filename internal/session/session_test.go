@@ -216,6 +216,27 @@ func TestPinFailureRefusesTheConnection(t *testing.T) {
 	}
 }
 
+// The retired v1 hello is not answered; the daemon says so rather than leaving
+// the peer to guess from silence, and it never becomes established.
+func TestV1HelloIsNotServed(t *testing.T) {
+	dk := mustKey(t)
+	vp, dp := newPipe()
+	legacy := 0
+	d, _ := NewDaemon(Config{
+		Inner: dp, SessionID: "sid-1", Static: dk,
+		OnLegacyPeer: func() { legacy++ },
+	})
+	if err := vp.Send([]byte(`{"kx":"hello","pub":"AAAA"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if legacy != 1 {
+		t.Fatalf("OnLegacyPeer calls = %d, want 1", legacy)
+	}
+	if d.Established() {
+		t.Fatal("a v1 hello must not establish a session")
+	}
+}
+
 // A frame is bound to its session, so one lifted from another cannot be
 // replayed even though both ends hold real keys.
 func TestFrameFromAnotherSessionIsRejected(t *testing.T) {

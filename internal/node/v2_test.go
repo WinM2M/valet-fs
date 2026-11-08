@@ -13,9 +13,9 @@ import (
 	"github.com/anomalyco/valet-fs/internal/vfs"
 )
 
-// startDualDaemon runs a daemon that serves both versions over the real hub,
+// startV2Daemon runs a v2 daemon over the real hub,
 // exactly as cmd/valetfs wires it.
-func startDualDaemon(t *testing.T, hubURL string, authorised [][]byte) (sid, claim string, daemonPub []byte, fs *vfs.MemFS) {
+func startV2Daemon(t *testing.T, hubURL string, authorised [][]byte) (sid, claim string, daemonPub []byte, fs *vfs.MemFS) {
 	t.Helper()
 
 	memfs := vfs.New(0)
@@ -38,13 +38,12 @@ func startDualDaemon(t *testing.T, hubURL string, authorised [][]byte) (sid, cla
 	if err != nil {
 		t.Fatalf("daemon dial: %v", err)
 	}
-	dc := session.NewDual(session.DualConfig{
-		Inner:    raw,
-		V1Static: v1kp,
-		V2:       session.Config{SessionID: sid, Static: static, Authorised: authorised},
-	})
+	dc, err := session.NewDaemon(session.Config{Inner: raw, SessionID: sid, Static: static, Authorised: authorised})
+	if err != nil {
+		t.Fatal(err)
+	}
 	n.Attach(dc)
-	dc.Start()
+	_ = dc.Start(context.Background())
 	t.Cleanup(func() { _ = dc.Close() })
 	return sid, claim, static.Public, memfs
 }
@@ -57,7 +56,7 @@ func TestV2SessionOverTheHub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid, claim, daemonPub, memfs := startDualDaemon(t, hubURL, [][]byte{vaultKey.Public})
+	sid, claim, daemonPub, memfs := startV2Daemon(t, hubURL, [][]byte{vaultKey.Public})
 
 	raw, _, _, err := ws.DialController(hubURL, sid, claim)
 	if err != nil {
@@ -101,7 +100,7 @@ func TestV2UnauthorisedVaultCannotWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid, claim, daemonPub, memfs := startDualDaemon(t, hubURL, [][]byte{authorised.Public})
+	sid, claim, daemonPub, memfs := startV2Daemon(t, hubURL, [][]byte{authorised.Public})
 
 	raw, _, _, err := ws.DialController(hubURL, sid, claim)
 	if err != nil {
