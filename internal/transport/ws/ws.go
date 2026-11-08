@@ -326,7 +326,7 @@ func dialWS(hubURL, sid, role, token string) (*Conn, error) {
 	wsURL := toWSScheme(hubURL) + "/ws/connect?sid=" + url.QueryEscape(sid) +
 		"&role=" + url.QueryEscape(role) + "&token=" + url.QueryEscape(token)
 	origin := strings.TrimSuffix(hubURL, "/")
-	c, err := websocket.Dial(wsURL, "", origin)
+	c, err := dialWebSocket(wsURL, origin)
 	if err != nil {
 		return nil, err
 	}

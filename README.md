@@ -192,6 +192,15 @@ valet-fs/
 └── README.md
 ```
 
+## HTTP proxies
+
+The WebSocket transport follows `HTTPS_PROXY` for `wss://` hubs and
+`HTTP_PROXY` for `ws://` hubs, including `NO_PROXY` exclusions (and Go's
+supported lowercase equivalents). HTTP and HTTPS proxies use CONNECT;
+TLS certificates are verified for both the hub and an HTTPS proxy.
+Proxy rejection fails the connection without falling back to a direct dial.
+The local control API and WebDAV remain on loopback.
+
 ## Build
 
 ```sh
