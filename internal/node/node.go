@@ -64,6 +64,7 @@ type ServeInfo struct {
 type MemoryNode struct {
 	cfg  Config
 	disp *rpc.Dispatcher
+	xf   *transfers
 
 	mu    sync.Mutex
 	conn  transport.Conn
@@ -76,7 +77,7 @@ type MemoryNode struct {
 
 // New builds a node and registers its handlers.
 func New(cfg Config) *MemoryNode {
-	n := &MemoryNode{cfg: cfg, disp: rpc.NewDispatcher()}
+	n := &MemoryNode{cfg: cfg, disp: rpc.NewDispatcher(), xf: newTransfers()}
 	n.register()
 	return n
 }
@@ -306,6 +307,10 @@ func (n *MemoryNode) register() {
 			// the session onto an older protocol. This copy arrives over the
 			// encrypted channel, so the two disagreeing means the hub lied.
 			"protocol_versions": rpc.Supported,
+			// Bulk transfer encodings this daemon accepts in BUNDLE and offers
+			// on PULL. Absent on older daemons, which is how the app knows to
+			// stay on per-file WRITE and plain PULL.
+			"encodings": Encodings,
 		}
 		if graceArmed {
 			res["grace_remaining_seconds"] = int64(graceLeft / time.Second)
@@ -334,6 +339,28 @@ func (n *MemoryNode) register() {
 
 	n.disp.Handle(rpc.MethodPull, func(req rpc.Message) (map[string]any, error) {
 		paths, _ := req.Params["paths"].([]any)
+		if acceptsGzip(req.Params) {
+			var files []bundleFile
+			for _, pv := range paths {
+				p, _ := pv.(string)
+				if p == "" {
+					continue
+				}
+				if data, err := fs.Read(p); err == nil {
+					files = append(files, bundleFile{Path: p, Data: data})
+				}
+			}
+			wire, raw, err := EncodeBundle(files)
+			if err != nil {
+				return nil, err
+			}
+			id, chunks := n.xf.offer(wire)
+			// No blobs here: the app fetches the chunks with PULL_CHUNK.
+			return map[string]any{
+				"enc": EncGzip, "xfer": id, "chunks": chunks,
+				"total": len(wire), "raw": raw, "files": len(files),
+			}, nil
+		}
 		blobs := map[string]any{}
 		for _, pv := range paths {
 			p, _ := pv.(string)
@@ -347,6 +374,61 @@ func (n *MemoryNode) register() {
 			blobs[p] = base64.StdEncoding.EncodeToString(data)
 		}
 		return map[string]any{"blobs": blobs}, nil
+	})
+
+	n.disp.Handle(rpc.MethodPullChunk, func(req rpc.Message) (map[string]any, error) {
+		id, _ := req.Params["xfer"].(string)
+		seq, ok := intParam(req.Params, "seq")
+		if id == "" || !ok {
+			return nil, fmt.Errorf("missing xfer or seq")
+		}
+		data, last, err := n.xf.chunk(id, seq)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"seq": seq, "last": last, "data_b64": base64.StdEncoding.EncodeToString(data)}, nil
+	})
+
+	// BUNDLE: one chunk of a compressed push. Nothing touches the file system
+	// until the last chunk arrives and the whole bundle decodes, so a push cut
+	// off half way leaves the VFS exactly as it was.
+	n.disp.Handle(rpc.MethodBundle, func(req rpc.Message) (map[string]any, error) {
+		if enc, _ := req.Params["enc"].(string); enc != EncGzip {
+			return nil, fmt.Errorf("bundle: unsupported encoding %q", enc)
+		}
+		id, _ := req.Params["xfer"].(string)
+		seq, ok := intParam(req.Params, "seq")
+		if id == "" || len(id) > 64 || !ok {
+			return nil, fmt.Errorf("missing xfer or seq")
+		}
+		last, _ := req.Params["last"].(bool)
+		data, err := decodeB64Param(req.Params, "data_b64")
+		if err != nil {
+			return nil, fmt.Errorf("bundle: %w", err)
+		}
+		wire, err := n.xf.appendChunk(id, seq, last, data)
+		if err != nil {
+			return nil, err
+		}
+		if wire == nil {
+			return map[string]any{"received": seq}, nil
+		}
+		files, err := DecodeBundle(wire)
+		if err != nil {
+			return nil, err
+		}
+		if n.cfg.Remount != nil {
+			n.cfg.Remount()
+		}
+		for _, f := range files {
+			if dir := path.Dir(f.Path); dir != "" && dir != "/" {
+				_ = fs.MkdirAll(dir, 0o755)
+			}
+			if err := fs.Write(f.Path, f.Data, 0o600); err != nil {
+				return nil, fmt.Errorf("bundle: %s: %w", f.Path, err)
+			}
+		}
+		return map[string]any{"received": seq, "written": len(files)}, nil
 	})
 
 	n.disp.Handle(rpc.MethodSetConfig, func(req rpc.Message) (map[string]any, error) {

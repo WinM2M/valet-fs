@@ -34,6 +34,10 @@ const (
 	MethodManifest  = "MANIFEST"
 	MethodPull      = "PULL"
 	MethodSetConfig = "SET_CONFIG"
+	// Compressed bulk transfer (see internal/node/bundle.go). Only used when
+	// the daemon advertises an encoding in STATUS.
+	MethodBundle    = "BUNDLE"
+	MethodPullChunk = "PULL_CHUNK"
 )
 
 // Message is a single RPC frame.
